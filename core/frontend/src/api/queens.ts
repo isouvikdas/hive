@@ -16,6 +16,33 @@ export interface QueenSessionResult {
   status: "live" | "resumed" | "created";
 }
 
+export interface ToolMeta {
+  name: string;
+  description: string;
+  input_schema?: Record<string, unknown>;
+  editable?: boolean;
+}
+
+export interface McpServerTools {
+  name: string;
+  tools: Array<ToolMeta & { enabled: boolean }>;
+}
+
+export interface QueenToolsResponse {
+  queen_id: string;
+  enabled_mcp_tools: string[] | null;
+  stale: boolean;
+  lifecycle: ToolMeta[];
+  synthetic: ToolMeta[];
+  mcp_servers: McpServerTools[];
+}
+
+export interface QueenToolsUpdateResult {
+  queen_id: string;
+  enabled_mcp_tools: string[] | null;
+  refreshed_sessions: number;
+}
+
 export const queensApi = {
   /** List all queen profiles (id, name, title). */
   list: () =>
@@ -56,5 +83,20 @@ export const queensApi = {
     api.post<QueenSessionResult>(`/queen/${queenId}/session/new`, {
       initial_prompt: initialPrompt,
       initial_phase: initialPhase || undefined,
+    }),
+
+  /** Enumerate the queen's tool surface (lifecycle + synthetic + MCP). */
+  getTools: (queenId: string) =>
+    api.get<QueenToolsResponse>(`/queen/${queenId}/tools`),
+
+  /** Persist the MCP tool allowlist for a queen.
+   *
+   * Pass ``null`` to reset to the default ("allow every MCP tool") or an
+   * explicit list to restrict the queen's tool surface. Lifecycle and
+   * synthetic tools are always enabled and cannot be listed here.
+   */
+  updateTools: (queenId: string, enabled: string[] | null) =>
+    api.patch<QueenToolsUpdateResult>(`/queen/${queenId}/tools`, {
+      enabled_mcp_tools: enabled,
     }),
 };

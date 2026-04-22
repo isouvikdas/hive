@@ -253,6 +253,93 @@ async def materialize_queen_identity(
         )
 
 
+def build_queen_tool_registry_bare() -> tuple[Any, dict[str, list[dict[str, Any]]]]:
+    """Build a Queen ``ToolRegistry`` and a (server_name → tools) catalog.
+
+    Used by the Tool Library GET route to populate the MCP tool surface
+    without needing a live queen session. We DO NOT register queen
+    lifecycle tools here (they require a Session stub); the catalog only
+    covers MCP-origin tools, which is what the allowlist gates.
+
+    Loading MCP servers spawns subprocesses, so call this once per
+    backend process and cache the result.
+    """
+    from pathlib import Path
+    from framework.loader.mcp_registry import MCPRegistry
+    from framework.loader.tool_registry import ToolRegistry
+    import framework.agents.queen as _queen_pkg
+
+    queen_registry = ToolRegistry()
+    queen_pkg_dir = Path(_queen_pkg.__file__).parent
+
+    mcp_config = queen_pkg_dir / "mcp_servers.json"
+    if mcp_config.exists():
+        try:
+            queen_registry.load_mcp_config(mcp_config)
+        except Exception:
+            logger.warning("build_queen_tool_registry_bare: MCP config failed", exc_info=True)
+
+    try:
+        reg = MCPRegistry()
+        reg.initialize()
+        if (queen_pkg_dir / "mcp_registry.json").is_file():
+            queen_registry.set_mcp_registry_agent_path(queen_pkg_dir)
+        registry_configs, selection_max_tools = reg.load_agent_selection(queen_pkg_dir)
+
+        already = {cfg.get("name") for cfg in registry_configs if cfg.get("name")}
+        extra: list[str] = []
+        try:
+            for entry in reg.list_installed():
+                if entry.get("source") != "local":
+                    continue
+                if not entry.get("enabled", True):
+                    continue
+                name = entry.get("name")
+                if name and name not in already:
+                    extra.append(name)
+        except Exception:
+            pass
+        if extra:
+            try:
+                extra_configs = reg.resolve_for_agent(include=extra)
+                registry_configs = list(registry_configs) + [
+                    reg._server_config_to_dict(c) for c in extra_configs
+                ]
+            except Exception:
+                logger.debug("build_queen_tool_registry_bare: resolve_for_agent(extra) failed", exc_info=True)
+
+        if registry_configs:
+            queen_registry.load_registry_servers(
+                registry_configs,
+                preserve_existing_tools=True,
+                log_collisions=False,
+                max_tools=selection_max_tools,
+            )
+    except Exception:
+        logger.warning("build_queen_tool_registry_bare: MCP registry load failed", exc_info=True)
+
+    # Build the catalog.
+    tools_by_name = queen_registry.get_tools()
+    server_map = dict(getattr(queen_registry, "_mcp_server_tools", {}) or {})
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for server_name in sorted(server_map):
+        entries: list[dict[str, Any]] = []
+        for tool_name in sorted(server_map[server_name]):
+            tool = tools_by_name.get(tool_name)
+            if tool is None:
+                continue
+            entries.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+            )
+        catalog[server_name] = entries
+
+    return queen_registry, catalog
+
+
 async def create_queen(
     session: Session,
     session_manager: Any,
@@ -326,6 +413,45 @@ async def create_queen(
             if (queen_pkg_dir / "mcp_registry.json").is_file():
                 queen_registry.set_mcp_registry_agent_path(queen_pkg_dir)
             registry_configs, selection_max_tools = registry.load_agent_selection(queen_pkg_dir)
+
+            # Auto-include every user-added local MCP server that the repo
+            # selection hasn't already loaded. Users register servers via
+            # the `/api/mcp/servers` route (or `hive mcp add`); they live in
+            # ~/.hive/mcp_registry/installed.json with source == "local".
+            # New servers take effect on the next queen session start; the
+            # prompt cache and ToolRegistry are still loaded once per boot.
+            already_loaded_names = {cfg.get("name") for cfg in registry_configs if cfg.get("name")}
+            extra_names: list[str] = []
+            try:
+                for entry in registry.list_installed():
+                    if entry.get("source") != "local":
+                        continue
+                    if not entry.get("enabled", True):
+                        continue
+                    name = entry.get("name")
+                    if not name or name in already_loaded_names:
+                        continue
+                    extra_names.append(name)
+            except Exception:
+                logger.debug("Queen: list_installed() failed while auto-including user servers", exc_info=True)
+
+            if extra_names:
+                try:
+                    extra_configs = registry.resolve_for_agent(include=extra_names)
+                    extra_dicts = [registry._server_config_to_dict(c) for c in extra_configs]
+                    registry_configs = list(registry_configs) + extra_dicts
+                    logger.info(
+                        "Queen: auto-including %d user-added MCP server(s): %s",
+                        len(extra_dicts),
+                        [c.get("name") for c in extra_dicts],
+                    )
+                except Exception:
+                    logger.warning(
+                        "Queen: failed to resolve user-added MCP servers %s",
+                        extra_names,
+                        exc_info=True,
+                    )
+
             if registry_configs:
                 results = queen_registry.load_registry_servers(
                     registry_configs,
@@ -416,6 +542,57 @@ async def create_queen(
         "Queen: incubating tools: %s",
         sorted(t.name for t in phase_state.incubating_tools),
     )
+
+    # ---- Per-queen MCP tool allowlist --------------------------------
+    # Capture the set of MCP-origin tool names so the allowlist in
+    # ``QueenPhaseState`` only gates MCP tools (lifecycle and synthetic
+    # tools always pass through). Then apply the queen profile's stored
+    # allowlist (if any) and memoize the filtered independent tool list.
+    mcp_server_tools_map: dict[str, set[str]] = dict(
+        getattr(queen_registry, "_mcp_server_tools", {})
+    )
+    phase_state.mcp_tool_names_all = set().union(*mcp_server_tools_map.values()) if mcp_server_tools_map else set()
+    phase_state.enabled_mcp_tools = queen_profile.get("enabled_mcp_tools")
+    phase_state.rebuild_independent_filter()
+    if phase_state.enabled_mcp_tools is not None:
+        total_mcp = len(phase_state.mcp_tool_names_all)
+        allowed_mcp = len(set(phase_state.enabled_mcp_tools) & phase_state.mcp_tool_names_all)
+        logger.info(
+            "Queen: per-queen MCP allowlist active — %d of %d MCP tools enabled",
+            allowed_mcp,
+            total_mcp,
+        )
+
+    # ---- MCP tool catalog for the frontend ---------------------------
+    # Snapshot per-server tool metadata so the Queen Tools API can render
+    # the tool surface without spawning MCP subprocesses. Keyed by server
+    # name so the UI can group tools by origin. Updated every time a
+    # queen boots, so installing a new server and starting a new queen
+    # session refreshes the catalog.
+    mcp_tool_catalog: dict[str, list[dict[str, Any]]] = {}
+    tools_by_name = {t.name: t for t in queen_tools}
+    for server_name, tool_names in mcp_server_tools_map.items():
+        server_entries: list[dict[str, Any]] = []
+        for tool_name in sorted(tool_names):
+            tool = tools_by_name.get(tool_name)
+            if tool is None:
+                continue
+            server_entries.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+            )
+        mcp_tool_catalog[server_name] = server_entries
+    # All queens share one MCP registry, so the catalog is a manager-level
+    # fact; stash it on the SessionManager so the Queen Tools route can
+    # render the tool list even when no queen session is currently live.
+    if session_manager is not None:
+        try:
+            session_manager._mcp_tool_catalog = mcp_tool_catalog  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("Queen: could not attach mcp_tool_catalog to manager", exc_info=True)
 
     # ---- Global + queen-scoped memory ----------------------------------
     global_dir, queen_mem_dir = initialize_memory_scopes(session, phase_state)

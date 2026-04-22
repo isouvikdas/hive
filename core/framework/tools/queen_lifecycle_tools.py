@@ -186,6 +186,22 @@ class QueenPhaseState:
     global_memory_dir: Path | None = None
     queen_memory_dir: Path | None = None
 
+    # Per-queen MCP tool allowlist for the INDEPENDENT phase. ``None`` means
+    # "allow every MCP tool" (default, backward-compatible). An explicit list
+    # is authoritative: only tools whose name appears here pass through.
+    # Lifecycle / synthetic tools bypass this gate regardless.
+    enabled_mcp_tools: list[str] | None = None
+    # Union of every MCP-origin tool name currently registered — the set the
+    # allowlist can gate. Populated once at queen boot from
+    # ``ToolRegistry._mcp_server_tools``. Names outside this set (lifecycle,
+    # ``ask_user``) always pass through the filter.
+    mcp_tool_names_all: set = field(default_factory=set)
+    # Memoized output of the filter applied to ``independent_tools``.
+    # Recomputed only when ``enabled_mcp_tools`` or ``independent_tools``
+    # changes, so ``get_current_tools()`` in the independent phase returns
+    # a byte-stable list between saves and the LLM prompt cache stays warm.
+    _filtered_independent_tools: list = field(default_factory=list)
+
     async def switch_to_working(self, source: str = "tool") -> None:
         """Switch to working phase — colony workers are running.
 
@@ -204,6 +220,27 @@ class QueenPhaseState:
                 "Colony workers are running. Available tools: " + ", ".join(tool_names) + "."
             )
 
+    def rebuild_independent_filter(self) -> None:
+        """Recompute the memoized independent-phase tool list.
+
+        Called once at queen boot (after ``independent_tools``,
+        ``mcp_tool_names_all`` and ``enabled_mcp_tools`` are all populated)
+        and again from the tools-PATCH handler whenever the allowlist
+        changes. Keeping the result memoized means the independent-phase
+        branch of ``get_current_tools()`` returns the same Python list
+        object across turns, so the LLM prompt cache stays warm until
+        the user explicitly edits their allowlist.
+        """
+        if self.enabled_mcp_tools is None:
+            self._filtered_independent_tools = list(self.independent_tools)
+            return
+        allowed = set(self.enabled_mcp_tools)
+        self._filtered_independent_tools = [
+            t
+            for t in self.independent_tools
+            if t.name not in self.mcp_tool_names_all or t.name in allowed
+        ]
+
     def get_current_tools(self) -> list:
         """Return tools for the current phase."""
         if self.phase == "working":
@@ -212,8 +249,14 @@ class QueenPhaseState:
             return list(self.reviewing_tools)
         if self.phase == "incubating":
             return list(self.incubating_tools)
-        # Default / "independent" — DM mode with full MCP tools.
-        return list(self.independent_tools)
+        # Default / "independent" — DM mode with full MCP tools, gated by
+        # the per-queen allowlist. Return the memoized list directly so the
+        # JSON sent to the LLM is byte-identical turn-to-turn.
+        if not self._filtered_independent_tools and self.independent_tools:
+            # Safety net: first-call in tests or code paths that skipped
+            # the explicit boot-time rebuild.
+            self.rebuild_independent_filter()
+        return self._filtered_independent_tools
 
     def get_current_prompt(self) -> str:
         """Return the system prompt for the current phase."""

@@ -7,6 +7,7 @@ import { executionApi } from "@/api/execution";
 import { compressImage } from "@/lib/image-utils";
 import type { Colony } from "@/types/colony";
 import { slugToColonyId } from "@/lib/colony-registry";
+import QueenToolsSection from "./QueenToolsSection";
 
 interface QueenProfilePanelProps {
   queenId: string;
@@ -353,6 +354,10 @@ export default function QueenProfilePanel({ queenId, colonies, onClose }: QueenP
                 </div>
               </div>
             )}
+
+            <div className="mb-6">
+              <QueenToolsSection queenId={queenId} />
+            </div>
 
             {colonies.length > 0 && (
               <div>

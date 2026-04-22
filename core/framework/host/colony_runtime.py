@@ -242,6 +242,19 @@ class ColonyRuntime:
         self._tools = tools or []
         self._tool_executor = tool_executor
 
+        # Per-colony MCP tool allowlist — applied when spawning workers. A
+        # value of ``None`` means "allow every MCP tool" (default), an empty
+        # list disables every MCP tool, and a list of names only enables
+        # those. Lifecycle / synthetic tools always pass through the filter
+        # because their names are absent from ``_mcp_tool_names_all``. The
+        # allowlist is re-read on every ``spawn`` so a PATCH that mutates
+        # this attribute via ``set_tool_allowlist`` takes effect on the
+        # NEXT worker spawn without a runtime restart. In-flight workers
+        # keep the tool list they booted with — workers have no dynamic
+        # tools provider today.
+        self._enabled_mcp_tools: list[str] | None = None
+        self._mcp_tool_names_all: set[str] = set()
+
         # Worker management
         self._workers: dict[str, Worker] = {}
         # The persistent client-facing overseer (optional). Set by
@@ -383,6 +396,45 @@ class ColonyRuntime:
         if not stages_config:
             return PipelineRunner([])
         return build_pipeline_from_config(stages_config)
+
+    # ── Per-colony tool allowlist ───────────────────────────────
+
+    def set_tool_allowlist(
+        self,
+        enabled_mcp_tools: list[str] | None,
+        mcp_tool_names_all: set[str] | None = None,
+    ) -> None:
+        """Configure the per-colony MCP tool allowlist.
+
+        Called at construction time (from SessionManager) and again from
+        the ``/api/colony/{name}/tools`` PATCH handler when a user edits
+        the allowlist. The change applies to the NEXT worker spawn — we
+        never mutate the tool list of a worker that is already running
+        (workers have no dynamic tools provider, so hot-reloading their
+        tool set would diverge from the list the LLM was already using).
+        """
+        self._enabled_mcp_tools = list(enabled_mcp_tools) if enabled_mcp_tools is not None else None
+        if mcp_tool_names_all is not None:
+            self._mcp_tool_names_all = set(mcp_tool_names_all)
+
+    def _apply_tool_allowlist(self, tools: list) -> list:
+        """Filter ``tools`` against the colony's MCP allowlist.
+
+        Lifecycle / synthetic tools (those whose names are NOT in
+        ``_mcp_tool_names_all``) are never gated. MCP tools are kept only
+        when ``_enabled_mcp_tools`` is None (default allow) or contains
+        their name. Input list order is preserved so downstream cache
+        keys and logs stay stable.
+        """
+        if self._enabled_mcp_tools is None:
+            return tools
+        allowed = set(self._enabled_mcp_tools)
+        return [
+            t
+            for t in tools
+            if getattr(t, "name", None) not in self._mcp_tool_names_all
+            or getattr(t, "name", None) in allowed
+        ]
 
     # ── Lifecycle ───────────────────────────────────────────────
 
@@ -657,6 +709,14 @@ class ColonyRuntime:
         spawn_spec = agent_spec or self._agent_spec
         spawn_tools = tools if tools is not None else self._tools
         spawn_executor = tool_executor or self._tool_executor
+
+        # Apply the per-colony MCP tool allowlist (if any). Done HERE —
+        # after spawn_tools is resolved but before it's frozen into the
+        # worker's AgentContext — so the next spawn reflects any PATCH
+        # that happened since the last spawn. A value of ``None`` on
+        # ``_enabled_mcp_tools`` is a no-op so the default path is
+        # unchanged.
+        spawn_tools = self._apply_tool_allowlist(spawn_tools)
 
         # Colony progress tracker: when the caller supplied a db_path
         # in input_data, this worker is part of a SQLite task queue

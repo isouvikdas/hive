@@ -5,6 +5,7 @@ import ColonyChat from "./pages/colony-chat";
 import QueenDM from "./pages/queen-dm";
 import OrgChart from "./pages/org-chart";
 import PromptLibrary from "./pages/prompt-library";
+import ToolLibrary from "./pages/tool-library";
 import CredentialsPage from "./pages/credentials";
 import NotFound from "./pages/not-found";
 
@@ -17,6 +18,7 @@ function App() {
         <Route path="/queen/:queenId" element={<QueenDM />} />
         <Route path="/org-chart" element={<OrgChart />} />
         <Route path="/prompt-library" element={<PromptLibrary />} />
+        <Route path="/tool-library" element={<ToolLibrary />} />
         <Route path="/credentials" element={<CredentialsPage />} />
         <Route path="*" element={<NotFound />} />
       </Route>

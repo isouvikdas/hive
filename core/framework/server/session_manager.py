@@ -1518,6 +1518,38 @@ class SessionManager:
             colony_id=session.id,
             pipeline_stages=[],  # queen pipeline runs in queen_orchestrator, not here
         )
+
+        # Per-colony tool allowlist, loaded from the colony's metadata.json
+        # when this session is attached to a real forked colony. For pure
+        # queen DM sessions (session.colony_name is None) we only capture
+        # the MCP-origin set — the allowlist stays ``None`` so every MCP
+        # tool passes through by default.
+        try:
+            mcp_tool_names_all: set[str] = set()
+            mgr_catalog = getattr(self, "_mcp_tool_catalog", None)
+            if isinstance(mgr_catalog, dict):
+                for entries in mgr_catalog.values():
+                    for entry in entries:
+                        name = entry.get("name") if isinstance(entry, dict) else None
+                        if name:
+                            mcp_tool_names_all.add(name)
+            enabled_mcp_tools: list[str] | None = None
+            colony_name = getattr(session, "colony_name", None)
+            if colony_name:
+                from framework.host.colony_metadata import load_colony_metadata
+
+                colony_meta = load_colony_metadata(colony_name)
+                raw = colony_meta.get("enabled_mcp_tools")
+                if raw is None or isinstance(raw, list):
+                    enabled_mcp_tools = raw
+            colony.set_tool_allowlist(enabled_mcp_tools, mcp_tool_names_all)
+        except Exception:
+            logger.debug(
+                "Colony allowlist bootstrap failed for session %s",
+                session.id,
+                exc_info=True,
+            )
+
         await colony.start()
         session.colony = colony
 

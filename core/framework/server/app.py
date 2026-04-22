@@ -333,6 +333,9 @@ def create_app(model: str | None = None) -> web.Application:
     from framework.server.routes_logs import register_routes as register_log_routes
     from framework.server.routes_messages import register_routes as register_message_routes
     from framework.server.routes_prompts import register_routes as register_prompt_routes
+    from framework.server.routes_colony_tools import register_routes as register_colony_tools_routes
+    from framework.server.routes_mcp import register_routes as register_mcp_routes
+    from framework.server.routes_queen_tools import register_routes as register_queen_tools_routes
     from framework.server.routes_queens import register_routes as register_queen_routes
     from framework.server.routes_sessions import register_routes as register_session_routes
     from framework.server.routes_workers import register_routes as register_worker_routes
@@ -346,6 +349,9 @@ def create_app(model: str | None = None) -> web.Application:
     register_worker_routes(app)
     register_log_routes(app)
     register_queen_routes(app)
+    register_queen_tools_routes(app)
+    register_colony_tools_routes(app)
+    register_mcp_routes(app)
     register_colony_worker_routes(app)
     register_prompt_routes(app)
 

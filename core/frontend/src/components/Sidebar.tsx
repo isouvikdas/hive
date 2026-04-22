@@ -12,6 +12,7 @@ import {
   X,
   Crown,
   Loader2,
+  Wrench,
 } from "lucide-react";
 import SidebarColonyItem from "./SidebarColonyItem";
 import SidebarQueenItem from "./SidebarQueenItem";
@@ -171,6 +172,13 @@ export default function Sidebar() {
         >
           <Sparkles className="w-4 h-4" />
           <span>Prompt Library</span>
+        </button>
+        <button
+          onClick={() => navigate("/tool-library")}
+          className="flex items-center gap-2.5 px-3 py-1.5 rounded-md text-sm text-foreground/70 hover:bg-sidebar-item-hover hover:text-foreground transition-colors"
+        >
+          <Wrench className="w-4 h-4" />
+          <span>Tool Library</span>
         </button>
         <button
           onClick={() => navigate("/credentials")}

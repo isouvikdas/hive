@@ -6,11 +6,12 @@ import { useModel, LLM_PROVIDERS } from "@/context/ModelContext";
 import { credentialsApi } from "@/api/credentials";
 import { configApi, type ModelOption } from "@/api/config";
 import { compressImage } from "@/lib/image-utils";
+import McpServersPanel from "./McpServersPanel";
 
 interface SettingsModalProps {
   open: boolean;
   onClose: () => void;
-  initialSection?: "profile" | "byok";
+  initialSection?: "profile" | "byok" | "mcp";
 }
 
 function ValidationBadge({ state }: { state: "validating" | { valid: boolean | null; message: string } | undefined }) {
@@ -37,7 +38,7 @@ export default function SettingsModal({ open, onClose, initialSection }: Setting
 
   const [displayName, setDisplayName] = useState(userProfile.displayName);
   const [about, setAbout] = useState(userProfile.about);
-  const [activeSection, setActiveSection] = useState<"profile" | "byok">(initialSection || "profile");
+  const [activeSection, setActiveSection] = useState<"profile" | "byok" | "mcp">(initialSection || "profile");
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -187,6 +188,12 @@ export default function SettingsModal({ open, onClose, initialSection }: Setting
             >
               BYOK
             </button>
+            <button
+              onClick={() => setActiveSection("mcp")}
+              className={`text-left text-sm px-3 py-1.5 rounded-md ${activeSection === "mcp" ? "bg-primary/15 text-primary font-medium" : "text-muted-foreground hover:text-foreground hover:bg-muted/30"}`}
+            >
+              MCP Servers
+            </button>
           </div>
         </div>
 
@@ -266,6 +273,8 @@ export default function SettingsModal({ open, onClose, initialSection }: Setting
                 </div>
               </>
             )}
+
+            {activeSection === "mcp" && <McpServersPanel />}
 
             {activeSection === "byok" && (
               <>
