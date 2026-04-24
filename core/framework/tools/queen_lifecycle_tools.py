@@ -116,6 +116,9 @@ class WorkerSessionAdapter:
     worker_path: Path | None = None
 
 
+QUEEN_PHASES: frozenset[str] = frozenset({"independent", "incubating", "working", "reviewing"})
+
+
 @dataclass
 class QueenPhaseState:
     """Mutable state container for queen operating phase.
@@ -131,7 +134,7 @@ class QueenPhaseState:
     that trigger phase transitions.
     """
 
-    phase: str = "independent"  # "independent", "incubating", "working", or "reviewing"
+    phase: str = "independent"  # one of QUEEN_PHASES
     independent_tools: list = field(default_factory=list)  # list[Tool]
     incubating_tools: list = field(default_factory=list)  # list[Tool]
     working_tools: list = field(default_factory=list)  # list[Tool]
@@ -182,6 +185,11 @@ class QueenPhaseState:
     # Cached recall blocks — populated async by recall_selector after each turn.
     _cached_global_recall_block: str = ""
     _cached_queen_recall_block: str = ""
+    # Cached dynamic system-prompt suffix — frozen at user-turn boundaries so
+    # AgentLoop iterations within a single turn send a byte-stable prompt and
+    # Anthropic's prompt cache keeps the static block warm. Rebuilt by
+    # refresh_dynamic_suffix() on CLIENT_INPUT_RECEIVED and on phase change.
+    _cached_dynamic_suffix: str = ""
     # Memory directories.
     global_memory_dir: Path | None = None
     queen_memory_dir: Path | None = None
@@ -235,11 +243,28 @@ class QueenPhaseState:
             self._filtered_independent_tools = list(self.independent_tools)
             return
         allowed = set(self.enabled_mcp_tools)
+        # If ``mcp_tool_names_all`` is empty, every tool falls through the
+        # "not in mcp_tool_names_all" branch below and the allowlist is
+        # silently ignored. That's a fail-open bug (the symptom: a
+        # role-restricted queen sees every MCP tool). Log a warning so the
+        # upstream cause is visible next time it happens.
+        if not self.mcp_tool_names_all:
+            logger.warning(
+                "rebuild_independent_filter: mcp_tool_names_all is empty but "
+                "allowlist has %d entries — allowlist cannot be applied. "
+                "Check that queen boot populated phase_state.mcp_tool_names_all.",
+                len(allowed),
+            )
         self._filtered_independent_tools = [
-            t
-            for t in self.independent_tools
-            if t.name not in self.mcp_tool_names_all or t.name in allowed
+            t for t in self.independent_tools if t.name not in self.mcp_tool_names_all or t.name in allowed
         ]
+        logger.info(
+            "rebuild_independent_filter: allowlist=%d, mcp_names=%d, independent=%d -> filtered=%d",
+            len(allowed),
+            len(self.mcp_tool_names_all),
+            len(self.independent_tools),
+            len(self._filtered_independent_tools),
+        )
 
     def get_current_tools(self) -> list:
         """Return tools for the current phase."""
@@ -258,8 +283,20 @@ class QueenPhaseState:
             self.rebuild_independent_filter()
         return self._filtered_independent_tools
 
-    def get_current_prompt(self) -> str:
-        """Return the system prompt for the current phase."""
+    def get_static_prompt(self) -> str:
+        """Return the stable portion of the system prompt for the current phase.
+
+        Includes identity, phase-role prompt, connected-integrations block,
+        skills catalog, and default skill protocols. These change only on
+        phase transition, queen identity selection, or when the user adds/
+        removes an integration — rare events. Designed to be byte-stable
+        across AgentLoop iterations within a single user turn so that
+        Anthropic's prompt cache keeps this block warm.
+
+        The dynamic tail (recall + timestamp) is returned separately by
+        ``get_dynamic_suffix()``; the LLM wrapper emits them as two system
+        content blocks with a cache breakpoint between them.
+        """
         if self.phase == "working":
             base = self.prompt_working
         elif self.phase == "reviewing":
@@ -293,11 +330,51 @@ class QueenPhaseState:
             parts.append(catalog_prompt)
         if self.protocols_prompt:
             parts.append(self.protocols_prompt)
+        return "\n\n".join(parts)
+
+    def refresh_dynamic_suffix(self) -> str:
+        """Rebuild and cache the dynamic system-prompt suffix.
+
+        The suffix contains recall blocks only. Called from the
+        CLIENT_INPUT_RECEIVED subscriber so the suffix is byte-stable across
+        every AgentLoop iteration within a single user turn.
+
+        Timestamps used to live here too; they were moved into the
+        conversation itself as a ``[YYYY-MM-DD HH:MM TZ]`` prefix on each
+        injected event (see ``drain_injection_queue``) so they ride on
+        byte-stable conversation history instead of busting the
+        per-turn system-prompt cache tail.
+        """
+        parts: list[str] = []
         if self._cached_global_recall_block:
             parts.append(self._cached_global_recall_block)
         if self._cached_queen_recall_block:
             parts.append(self._cached_queen_recall_block)
-        return "\n\n".join(parts)
+        self._cached_dynamic_suffix = "\n\n".join(parts)
+        return self._cached_dynamic_suffix
+
+    def get_dynamic_suffix(self) -> str:
+        """Return the cached dynamic system-prompt suffix.
+
+        Lazily populates on first call so callers don't have to know about
+        the refresh lifecycle. Subsequent calls return the cached string
+        until ``refresh_dynamic_suffix()`` is invoked again.
+        """
+        if not self._cached_dynamic_suffix:
+            self.refresh_dynamic_suffix()
+        return self._cached_dynamic_suffix
+
+    def get_current_prompt(self) -> str:
+        """Return the concatenated system prompt (static + dynamic).
+
+        Retained for backward compatibility and for callers that want one
+        string (conversation persistence, debug dumps). The AgentLoop sends
+        the two pieces separately to the LLM so the cache can break between
+        them — see ``get_static_prompt()`` / ``get_dynamic_suffix()``.
+        """
+        static = self.get_static_prompt()
+        dynamic = self.get_dynamic_suffix()
+        return f"{static}\n\n{dynamic}" if dynamic else static
 
     async def _emit_phase_event(self) -> None:
         """Publish a QUEEN_PHASE_CHANGED event so the frontend updates the tag."""
@@ -1632,9 +1709,7 @@ def register_queen_lifecycle_tools(
 
             queen_overrides_path = QUEENS_DIR / queen_id / "skills_overrides.json"
             if queen_overrides_path.exists():
-                queen_store = SkillOverrideStore.load(
-                    queen_overrides_path, scope_label=f"queen:{queen_id}"
-                )
+                queen_store = SkillOverrideStore.load(queen_overrides_path, scope_label=f"queen:{queen_id}")
                 # Shallow clone: queen's explicit toggles + master switch
                 # become the colony's starting state. Tombstones propagate
                 # so a queen-deleted UI skill doesn't resurrect here.

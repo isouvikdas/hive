@@ -63,6 +63,7 @@ class MockStreamingLLM(LLMProvider):
         system: str = "",
         tools: list[Tool] | None = None,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator:
         self.stream_calls.append({"messages": messages, "system": system, "tools": tools})
 
@@ -311,7 +312,7 @@ class TestReportToParent:
             model: str = "mock"
             stream_calls: list[dict] = []
 
-            async def stream(self, messages, system="", tools=None, max_tokens=4096):
+            async def stream(self, messages, system="", tools=None, max_tokens=4096, **kwargs):
                 self.stream_calls.append({"messages": messages})
                 raise RuntimeError("boom — simulated LLM crash")
                 yield  # pragma: no cover — make this an async generator

@@ -248,15 +248,22 @@ async def handle_queen_session(request: web.Request) -> web.Response:
     # Skip colony sessions: a colony forked from this queen also carries
     # queen_name == queen_id, but it has a worker loaded (colony_id /
     # worker_path set) and is the colony's chat, not the queen's DM.
-    for session in manager.list_sessions():
-        if session.queen_name == queen_id and session.colony_id is None and session.worker_path is None:
-            return web.json_response(
-                {
-                    "session_id": session.id,
-                    "queen_id": queen_id,
-                    "status": "live",
-                }
-            )
+    # When multiple DM sessions for this queen are live at once (e.g. the
+    # user created a new session, then navigated away and back), return
+    # the most recently loaded one so we don't resurrect a stale older
+    # session ahead of a freshly created one.
+    live_matches = [
+        s for s in manager.list_sessions() if s.queen_name == queen_id and s.colony_id is None and s.worker_path is None
+    ]
+    if live_matches:
+        latest = max(live_matches, key=lambda s: s.loaded_at)
+        return web.json_response(
+            {
+                "session_id": latest.id,
+                "queen_id": queen_id,
+                "status": "live",
+            }
+        )
 
     # 2. Find the most recent cold session for this queen and resume it.
     # IMPORTANT: skip sessions that don't belong in the queen DM:
@@ -378,6 +385,8 @@ async def handle_select_queen_session(request: web.Request) -> web.Response:
 
 async def handle_new_queen_session(request: web.Request) -> web.Response:
     """POST /api/queen/{queen_id}/session/new -- create a fresh queen session."""
+    from framework.tools.queen_lifecycle_tools import QUEEN_PHASES
+
     queen_id = request.match_info["queen_id"]
     manager = request.app["manager"]
 
@@ -387,9 +396,25 @@ async def handle_new_queen_session(request: web.Request) -> web.Response:
     except FileNotFoundError:
         return web.json_response({"error": f"Queen '{queen_id}' not found"}, status=404)
 
-    body = await request.json() if request.can_read_body else {}
+    if request.can_read_body:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "Request body must be a JSON object"}, status=400)
+    else:
+        body = {}
     initial_prompt = body.get("initial_prompt")
     initial_phase = body.get("initial_phase") or "independent"
+    if initial_phase not in QUEEN_PHASES:
+        return web.json_response(
+            {
+                "error": f"Invalid initial_phase '{initial_phase}'",
+                "valid": sorted(QUEEN_PHASES),
+            },
+            status=400,
+        )
 
     session = await manager.create_session(
         initial_prompt=initial_prompt,

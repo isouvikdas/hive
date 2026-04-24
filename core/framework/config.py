@@ -155,6 +155,57 @@ def get_preferred_worker_model() -> str | None:
     return None
 
 
+def get_vision_fallback_model() -> str | None:
+    """Return the configured vision-fallback model, or None if not configured.
+
+    Reads from the ``vision_fallback`` section of ~/.hive/configuration.json.
+    Used by the agent-loop hook that captions tool-result images when the
+    main agent's model cannot accept image content (text-only LLMs).
+
+    When this returns None the fallback chain skips the configured-subagent
+    stage and proceeds straight to the generic caption rotation
+    (``_describe_images_as_text``).
+    """
+    vision = get_hive_config().get("vision_fallback", {})
+    if vision.get("provider") and vision.get("model"):
+        provider = str(vision["provider"])
+        model = str(vision["model"]).strip()
+        if provider.lower() == "openrouter" and model.lower().startswith("openrouter/"):
+            model = model[len("openrouter/") :]
+        if model:
+            return f"{provider}/{model}"
+    return None
+
+
+def get_vision_fallback_api_key() -> str | None:
+    """Return the API key for the vision-fallback model.
+
+    Resolution order: ``vision_fallback.api_key_env_var`` from the env,
+    then the default ``get_api_key()``. No subscription-token branches —
+    vision fallback is intended for hosted vision models (Anthropic,
+    OpenAI, Google), not for the subscription-bearer providers.
+    """
+    vision = get_hive_config().get("vision_fallback", {})
+    if not vision:
+        return get_api_key()
+    api_key_env_var = vision.get("api_key_env_var")
+    if api_key_env_var:
+        return os.environ.get(api_key_env_var)
+    return get_api_key()
+
+
+def get_vision_fallback_api_base() -> str | None:
+    """Return the api_base for the vision-fallback model, or None."""
+    vision = get_hive_config().get("vision_fallback", {})
+    if not vision:
+        return None
+    if vision.get("api_base"):
+        return vision["api_base"]
+    if str(vision.get("provider", "")).lower() == "openrouter":
+        return OPENROUTER_API_BASE
+    return None
+
+
 def get_worker_api_key() -> str | None:
     """Return the API key for the worker LLM, falling back to the default key."""
     worker_llm = get_hive_config().get("worker_llm", {})

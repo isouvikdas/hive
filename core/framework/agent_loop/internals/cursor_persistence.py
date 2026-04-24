@@ -12,6 +12,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from framework.agent_loop.conversation import ConversationStore, NodeConversation
@@ -191,15 +192,21 @@ async def drain_injection_queue(
                     else:
                         logger.info("[drain] no vision fallback available; images dropped")
                 image_content = None
-            # Real user input is stored as-is; external events get a prefix
+            # Stamp every injected event with its arrival time so the model
+            # has a consistent temporal log to reason over (and so the
+            # stamp lives inside byte-stable conversation history instead
+            # of a per-turn system-prompt tail). Minute precision is what
+            # the queen needs for conversational / scheduling context.
+            stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
             if is_client_input:
+                stamped = f"[{stamp}] {content}" if content else f"[{stamp}]"
                 await conversation.add_user_message(
-                    content,
+                    stamped,
                     is_client_input=True,
                     image_content=image_content,
                 )
             else:
-                await conversation.add_user_message(f"[External event]: {content}")
+                await conversation.add_user_message(f"[{stamp}] [External event] {content}")
             count += 1
         except asyncio.QueueEmpty:
             break
@@ -232,7 +239,8 @@ async def drain_trigger_queue(
         payload_str = json.dumps(t.payload, default=str)
         parts.append(f"[TRIGGER: {t.trigger_type}/{t.source_id}]{task_line}\n{payload_str}")
 
-    combined = "\n\n".join(parts)
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    combined = f"[{stamp}]\n" + "\n\n".join(parts)
     logger.info("[drain] %d trigger(s): %s", len(triggers), combined[:200])
     # Tag the message so the UI can render a banner instead of the raw
     # `[TRIGGER: ...]` text. The LLM still sees `combined` verbatim.

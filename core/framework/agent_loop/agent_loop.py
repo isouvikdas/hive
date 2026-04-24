@@ -85,7 +85,12 @@ from framework.agent_loop.internals.types import (
     JudgeVerdict,
     TriggerEvent,
 )
+from framework.agent_loop.internals.vision_fallback import (
+    caption_tool_image,
+    extract_intent_for_tool,
+)
 from framework.agent_loop.types import AgentContext, AgentProtocol, AgentResult
+from framework.config import get_vision_fallback_model
 from framework.host.event_bus import EventBus
 from framework.llm.capabilities import filter_tools_for_model, supports_image_tool_results
 from framework.llm.provider import Tool, ToolResult, ToolUse
@@ -217,6 +222,52 @@ async def _describe_images_as_text(image_content: list[dict[str, Any]]) -> str |
             continue
 
     return None
+
+
+def _vision_fallback_active(model: str | None) -> bool:
+    """Return True if tool-result images for *model* should be routed
+    through the vision-fallback chain rather than sent to the model.
+
+    Trigger: the model appears in Hive's curated text-only deny list
+    (``capabilities.supports_image_tool_results`` returns False).
+    That list is the only reliable signal — LiteLLM's
+    ``supports_vision`` returns False for any unknown model
+    (including custom-served vision-capable models like Jackrong/Qwopus3.5)
+    so it cannot be used as a gate; and LiteLLM's openai chat
+    transformer doesn't strip image blocks anyway, so passing them
+    through to a vision-capable but litellm-unrecognised model still
+    works end-to-end.
+
+    The ``vision_fallback`` config block is the *substitution* model —
+    it doesn't widen the trigger. To force fallback for a model the
+    deny list doesn't cover yet, add it to
+    ``capabilities._TEXT_ONLY_MODEL_BARE_PREFIXES`` /
+    ``_TEXT_ONLY_PROVIDER_PREFIXES`` rather than relying on a runtime
+    config.
+    """
+    if not model:
+        return False
+    return not supports_image_tool_results(model)
+
+
+async def _captioning_chain(
+    intent: str,
+    image_content: list[dict[str, Any]],
+) -> str | None:
+    """Two-stage caption chain used by the agent-loop tool-result hook.
+
+    Stage 1: configured ``vision_fallback`` model with intent + images.
+    Stage 2: generic-caption rotation (gpt-4o-mini → claude-3-haiku
+    → gemini-flash) when stage 1 is unconfigured or fails.
+
+    Returns the caption text or None if both stages fail. Caller is
+    responsible for the placeholder-on-None and the splice into the
+    persisted tool-result content.
+    """
+    caption = await caption_tool_image(intent, image_content)
+    if not caption:
+        caption = await _describe_images_as_text(image_content)
+    return caption
 
 
 # Pattern for detecting context-window-exceeded errors across LLM providers.
@@ -575,6 +626,7 @@ class AgentLoop(AgentProtocol):
                 store=self._conversation_store,
                 run_id=ctx.effective_run_id,
                 compaction_buffer_tokens=self._config.compaction_buffer_tokens,
+                compaction_buffer_ratio=self._config.compaction_buffer_ratio,
                 compaction_warning_buffer_tokens=(self._config.compaction_warning_buffer_tokens),
             )
             accumulator = OutputAccumulator(
@@ -587,7 +639,12 @@ class AgentLoop(AgentProtocol):
 
             initial_message = self._build_initial_message(ctx)
             if initial_message:
-                await conversation.add_user_message(initial_message)
+                # Stamp with arrival time so the conversation has a
+                # temporal anchor for the first turn, matching the
+                # stamping done by drain_injection_queue for every
+                # subsequent event.
+                _stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+                await conversation.add_user_message(f"[{_stamp}] {initial_message}")
 
             await self._run_hooks("session_start", conversation, trigger=initial_message)
 
@@ -599,7 +656,8 @@ class AgentLoop(AgentProtocol):
             initial_message = self._build_initial_message(ctx)
             if not initial_message:
                 initial_message = "Hello"
-            await conversation.add_user_message(initial_message)
+            _stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+            await conversation.add_user_message(f"[{_stamp}] {initial_message}")
 
         # 2b. Restore spill counter from existing files (resume safety)
         self._restore_spill_counter()
@@ -619,8 +677,23 @@ class AgentLoop(AgentProtocol):
         # Hide image-producing tools from text-only models so they never try
         # to call them. Avoids wasted turns + "screenshot failed" lessons
         # getting saved to memory. See framework.llm.capabilities.
+        # EXCEPTION: when the model IS on the text-only deny list AND
+        # a vision_fallback subagent is configured, leave image tools
+        # visible. The post-execution hook in the inner tool loop
+        # will route each image_content through the fallback VLM and
+        # replace it with a text caption before the main agent sees
+        # the result — so the main agent gets captions instead of
+        # raw images, rather than losing the tool entirely. We DON'T
+        # bypass the filter for vision-capable models (that would be
+        # a no-op anyway — the filter doesn't fire for them) and we
+        # DON'T bypass it without a configured fallback (the agent
+        # would just see raw stripped tool results with no caption).
         _llm_model = ctx.llm.model if ctx.llm else ""
-        tools, _hidden_image_tools = filter_tools_for_model(tools, _llm_model)
+        _text_only_main = _llm_model and not supports_image_tool_results(_llm_model)
+        if _text_only_main and get_vision_fallback_model() is not None:
+            _hidden_image_tools: list[str] = []
+        else:
+            tools, _hidden_image_tools = filter_tools_for_model(tools, _llm_model)
 
         logger.info(
             "[%s] Tools available (%d): %s | direct_user_io=%s | judge=%s | hidden_image_tools=%s",
@@ -799,14 +872,50 @@ class AgentLoop(AgentProtocol):
                 or ctx.dynamic_skills_catalog_provider is not None
             ):
                 if ctx.dynamic_prompt_provider is not None:
-                    _new_prompt = stamp_prompt_datetime(ctx.dynamic_prompt_provider())
+                    _new_prompt = ctx.dynamic_prompt_provider()
+                    # When a suffix provider is also wired (Queen's
+                    # static/dynamic split), keep the two pieces separate
+                    # so the LLM wrapper can emit them as two system
+                    # content blocks with a cache breakpoint between them.
+                    # The timestamp used to be stamped here via
+                    # stamp_prompt_datetime on every iteration — it now
+                    # lives inside the frozen dynamic suffix and is only
+                    # refreshed at user-turn boundaries, so per-iteration
+                    # stamping would both double-stamp and bust the cache.
+                    _new_suffix: str | None = None
+                    if ctx.dynamic_prompt_suffix_provider is not None:
+                        try:
+                            _new_suffix = ctx.dynamic_prompt_suffix_provider() or ""
+                        except Exception:
+                            logger.debug(
+                                "[%s] dynamic_prompt_suffix_provider raised — falling back to legacy stamp",
+                                node_id,
+                                exc_info=True,
+                            )
+                            _new_suffix = None
+                    if _new_suffix is None:
+                        # Legacy / fallback path: no split in use (or the
+                        # suffix provider raised). Stamp the timestamp at
+                        # the end of the single-string prompt so the model
+                        # still sees a current "now".
+                        _new_prompt = stamp_prompt_datetime(_new_prompt)
                 else:
                     # build_system_prompt_for_context reads dynamic_skills_catalog_provider
                     # directly; no separate branch needed.
                     _new_prompt = build_system_prompt_for_context(ctx)
-                if _new_prompt != conversation.system_prompt:
-                    conversation.update_system_prompt(_new_prompt)
-                    logger.info("[%s] Dynamic prompt updated", node_id)
+                    _new_suffix = None
+                if _new_suffix is not None:
+                    _combined_for_compare = f"{_new_prompt}\n\n{_new_suffix}" if _new_suffix else _new_prompt
+                    if (
+                        _combined_for_compare != conversation.system_prompt
+                        or _new_suffix != conversation.system_prompt_dynamic_suffix
+                    ):
+                        conversation.update_system_prompt(_new_prompt, dynamic_suffix=_new_suffix)
+                        logger.info("[%s] Dynamic prompt updated (split)", node_id)
+                else:
+                    if _new_prompt != conversation.system_prompt:
+                        conversation.update_system_prompt(_new_prompt)
+                        logger.info("[%s] Dynamic prompt updated", node_id)
 
             # 6c. Publish iteration event (with per-iteration metadata when available)
             _iter_meta = None
@@ -896,6 +1005,8 @@ class AgentLoop(AgentProtocol):
                         input_tokens=turn_tokens.get("input", 0),
                         output_tokens=turn_tokens.get("output", 0),
                         cached_tokens=turn_tokens.get("cached", 0),
+                        cache_creation_tokens=turn_tokens.get("cache_creation", 0),
+                        cost_usd=float(turn_tokens.get("cost", 0.0) or 0.0),
                         execution_id=execution_id,
                         iteration=iteration,
                     )
@@ -2296,7 +2407,9 @@ class AgentLoop(AgentProtocol):
         stream_id = ctx.stream_id or ctx.agent_id
         node_id = ctx.agent_id
         execution_id = ctx.execution_id or ""
-        token_counts: dict[str, int] = {"input": 0, "output": 0, "cached": 0}
+        # Mixed-type dict: int token counts + str stop_reason/model + float cost.
+        # Typed loosely to avoid churn in the many call sites that read from it.
+        token_counts: dict[str, Any] = {"input": 0, "output": 0, "cached": 0, "cache_creation": 0, "cost": 0.0}
         tool_call_count = 0
         final_text = ""
         final_system_prompt = conversation.system_prompt
@@ -2437,9 +2550,16 @@ class AgentLoop(AgentProtocol):
                 nonlocal _first_event_at
                 _clean_snapshot = ""  # visible-only text for the frontend
 
+                # Split-prompt path: pass STATIC and DYNAMIC tail separately
+                # so the LLM wrapper can emit them as two Anthropic system
+                # content blocks with a cache breakpoint between them. When
+                # no split is in use, ``system_prompt_static`` equals the
+                # full prompt and the suffix is empty — identical to the
+                # legacy single-block request.
                 async for event in ctx.llm.stream(
                     messages=_msgs,
-                    system=conversation.system_prompt,
+                    system=conversation.system_prompt_static,
+                    system_dynamic_suffix=(conversation.system_prompt_dynamic_suffix or None),
                     tools=tools if tools else None,
                     max_tokens=ctx.max_tokens,
                 ):
@@ -2520,6 +2640,8 @@ class AgentLoop(AgentProtocol):
                         token_counts["input"] += event.input_tokens
                         token_counts["output"] += event.output_tokens
                         token_counts["cached"] += event.cached_tokens
+                        token_counts["cache_creation"] += event.cache_creation_tokens
+                        token_counts["cost"] = token_counts.get("cost", 0.0) + event.cost_usd
                         token_counts["stop_reason"] = event.stop_reason
                         token_counts["model"] = event.model
 
@@ -3312,6 +3434,32 @@ class AgentLoop(AgentProtocol):
 
             # Phase 3: record results into conversation in original order,
             # build logged/real lists, and publish completed events.
+            #
+            # Vision-fallback prefetch: a single turn may fire several
+            # image-producing tools in parallel (e.g. one screenshot
+            # per tab). Captioning each one takes a vision LLM round
+            # trip (1–30 s). Doing them sequentially in this loop
+            # would serialise that latency per image. Instead, kick
+            # off all caption tasks concurrently NOW, and await each
+            # one just-in-time inside the per-tc body. If only a
+            # single image needs captioning, this collapses to a
+            # single await with no overhead.
+            _model_text_only = ctx.llm and _vision_fallback_active(ctx.llm.model)
+            caption_tasks: dict[str, asyncio.Task[str | None]] = {}
+            if _model_text_only:
+                for tc in tool_calls[:executed_in_batch]:
+                    res = results_by_id.get(tc.tool_use_id)
+                    if not res or not res.image_content:
+                        continue
+                    intent = extract_intent_for_tool(
+                        conversation,
+                        tc.tool_name,
+                        tc.tool_input or {},
+                    )
+                    caption_tasks[tc.tool_use_id] = asyncio.create_task(
+                        _captioning_chain(intent, res.image_content)
+                    )
+
             for tc in tool_calls[:executed_in_batch]:
                 result = results_by_id.get(tc.tool_use_id)
                 if result is None:
@@ -3334,11 +3482,31 @@ class AgentLoop(AgentProtocol):
                     logged_tool_calls.append(tool_entry)
 
                 image_content = result.image_content
-                if image_content and ctx.llm and not supports_image_tool_results(ctx.llm.model):
-                    logger.info(
-                        "Stripping image_content from tool result; model '%s' does not support images in tool results",
-                        ctx.llm.model,
-                    )
+                # Vision-fallback marker spliced into the persisted text
+                # below. None when no captioning ran (vision-capable
+                # main model, no images, or no fallback chain reached
+                # this tool).
+                vision_fallback_marker: str | None = None
+                if image_content and tc.tool_use_id in caption_tasks:
+                    caption = await caption_tasks.pop(tc.tool_use_id)
+                    if caption:
+                        vision_fallback_marker = f"[vision-fallback caption]\n{caption}"
+                        logger.info(
+                            "vision_fallback: captioned %d image(s) for tool '%s' "
+                            "(model '%s' routed through fallback)",
+                            len(image_content),
+                            tc.tool_name,
+                            ctx.llm.model if ctx.llm else "?",
+                        )
+                    else:
+                        vision_fallback_marker = "[image stripped — vision fallback exhausted]"
+                        logger.info(
+                            "vision_fallback: exhausted; stripping %d image(s) from "
+                            "tool '%s' result without caption (model '%s')",
+                            len(image_content),
+                            tc.tool_name,
+                            ctx.llm.model if ctx.llm else "?",
+                        )
                     image_content = None
 
                 # Apply replay-detector steer prefix if this call matched a
@@ -3349,6 +3517,11 @@ class AgentLoop(AgentProtocol):
                     _prefix = replay_prefixes_by_id.get(tc.tool_use_id)
                     if _prefix:
                         stored_content = f"{_prefix}{stored_content or ''}"
+
+                # Splice the vision-fallback caption / placeholder into
+                # the persisted text after any prefix has been applied.
+                if vision_fallback_marker:
+                    stored_content = f"{stored_content or ''}\n\n{vision_fallback_marker}"
 
                 await conversation.add_tool_result(
                     tool_use_id=tc.tool_use_id,
@@ -4101,6 +4274,8 @@ class AgentLoop(AgentProtocol):
         input_tokens: int,
         output_tokens: int,
         cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        cost_usd: float = 0.0,
         execution_id: str = "",
         iteration: int | None = None,
     ) -> None:
@@ -4113,6 +4288,8 @@ class AgentLoop(AgentProtocol):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cost_usd=cost_usd,
             execution_id=execution_id,
             iteration=iteration,
         )

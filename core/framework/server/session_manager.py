@@ -1223,8 +1223,27 @@ class SessionManager:
                 logger.info("Session '%s': shutdown reflection spawned", session_id)
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
-            except Exception:
-                logger.warning("Session '%s': failed to spawn shutdown reflection", session_id, exc_info=True)
+            except RuntimeError as exc:
+                # Most common when a session is stopped after the event loop
+                # has closed (e.g. during server shutdown or from an atexit
+                # handler). The reflection would have had nothing to write
+                # anyway — no new turns since the last periodic reflection.
+                logger.warning(
+                    "Session '%s': shutdown reflection skipped — event loop unavailable (%s). "
+                    "Normal during server shutdown; anything worth persisting was saved by the "
+                    "periodic reflection after the last turn.",
+                    session_id,
+                    exc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session '%s': failed to spawn shutdown reflection: %s: %s. "
+                    "Check that queen_dir exists and session.llm is configured; full traceback follows.",
+                    session_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
 
         if session.queen_task is not None:
             session.queen_task.cancel()

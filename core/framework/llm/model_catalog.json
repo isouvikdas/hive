@@ -265,8 +265,8 @@
           "max_context_tokens": 240000
         },
         {
-          "id": "GLM-5",
-          "label": "GLM-5 - Via Hive",
+          "id": "glm-5.1",
+          "label": "GLM-5.1 - Via Hive",
           "recommended": false,
           "max_tokens": 32768,
           "max_context_tokens": 180000
@@ -352,7 +352,7 @@
     "zai_code": {
       "provider": "openai",
       "api_key_env_var": "ZAI_API_KEY",
-      "model": "glm-5",
+      "model": "glm-5.1",
       "max_tokens": 32768,
       "max_context_tokens": 180000,
       "api_base": "https://api.z.ai/api/coding/paas/v4"
@@ -399,8 +399,8 @@
           "recommended": false
         },
         {
-          "id": "GLM-5",
-          "label": "GLM-5",
+          "id": "glm-5.1",
+          "label": "glm-5.1",
           "recommended": false
         }
       ]

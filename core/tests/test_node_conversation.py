@@ -299,6 +299,35 @@ class TestNodeConversation:
         assert conv.needs_compaction() is True
 
     @pytest.mark.asyncio
+    async def test_needs_compaction_uses_hybrid_buffer(self):
+        """Hybrid: effective buffer is fixed_tokens + ratio * max_context.
+
+        With max=1000, fixed=200, ratio=0.1 → effective_buffer=300, so
+        the trigger threshold is 700.
+        """
+        conv = NodeConversation(
+            max_context_tokens=1000,
+            compaction_buffer_tokens=200,
+            compaction_buffer_ratio=0.1,
+        )
+        conv.update_token_count(650)
+        assert conv.needs_compaction() is False
+        conv.update_token_count(700)
+        assert conv.needs_compaction() is True
+
+    @pytest.mark.asyncio
+    async def test_needs_compaction_ratio_only(self):
+        """Ratio component alone (without a fixed floor) still works."""
+        conv = NodeConversation(
+            max_context_tokens=1000,
+            compaction_buffer_ratio=0.25,
+        )
+        conv.update_token_count(740)
+        assert conv.needs_compaction() is False
+        conv.update_token_count(760)
+        assert conv.needs_compaction() is True
+
+    @pytest.mark.asyncio
     async def test_legacy_threshold_rule_still_works_without_buffer(self):
         """Without compaction_buffer_tokens, the old multiplicative rule
         applies so existing callers keep behaving identically."""

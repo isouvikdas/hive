@@ -53,6 +53,7 @@ class _ByTaskMockLLM(LLMProvider):
         system: str = "",
         tools: list[Tool] | None = None,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator:
         first_user = ""
         for m in messages:
@@ -329,6 +330,7 @@ class _SlowLLM(LLMProvider):
         system: str = "",
         tools: list[Tool] | None = None,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator:
         self._turn_count += 1
         # On the second call (after the watcher's inject), check whether the

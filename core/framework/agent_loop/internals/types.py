@@ -69,6 +69,20 @@ class LoopConfig:
     # and less tight than Anthropic's own counting. Override via
     # LoopConfig for larger windows.
     compaction_buffer_tokens: int = 8_000
+    # Ratio-based component of the hybrid compaction buffer. Effective
+    # headroom reserved before compaction fires is
+    #   compaction_buffer_tokens + compaction_buffer_ratio * max_context_tokens
+    # The ratio scales with the model's window where the absolute fixed
+    # component does not (an 8k absolute buffer is 75% trigger on a 32k
+    # window but 96% on a 200k window). Combining them gives an absolute
+    # floor sized for the worst-case single tool result (one un-spilled
+    # max_tool_result_chars payload ≈ 30k chars ≈ 7.5k tokens, rounded to
+    # 8k) plus a fractional headroom that keeps the trigger meaningful on
+    # large windows, so the inner tool loop always has room to grow
+    # without tripping the mid-turn pre-send guard. Defaults: 8k + 15%.
+    # On 32k that's a 12.8k buffer (~60% trigger); on 200k it's 38k
+    # (~81% trigger); on 1M it's 158k (~84% trigger).
+    compaction_buffer_ratio: float = 0.15
     # Warning is emitted one buffer earlier so the user/telemetry gets
     # a "we're close" signal without triggering a compaction pass.
     compaction_warning_buffer_tokens: int = 12_000

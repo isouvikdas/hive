@@ -427,9 +427,20 @@ class NodeConversation:
         store: ConversationStore | None = None,
         run_id: str | None = None,
         compaction_buffer_tokens: int | None = None,
+        compaction_buffer_ratio: float | None = None,
         compaction_warning_buffer_tokens: int | None = None,
     ) -> None:
         self._system_prompt = system_prompt
+        # Optional split: when a caller updates the prompt with a
+        # ``dynamic_suffix`` argument, we remember the static prefix and
+        # suffix separately so the LLM wrapper can emit them as two
+        # Anthropic system content blocks with a cache breakpoint between
+        # them. ``_system_prompt`` stays as the concatenated form used for
+        # persistence and for the legacy single-block LLM path.
+        # On restore, these default to the concat/empty pair — the next
+        # AgentLoop iteration's dynamic-prompt refresh step repopulates.
+        self._system_prompt_static: str = system_prompt
+        self._system_prompt_dynamic_suffix: str = ""
         self._max_context_tokens = max_context_tokens
         self._compaction_threshold = compaction_threshold
         # Buffer-based compaction trigger (Gap 7). When set, takes
@@ -439,6 +450,11 @@ class NodeConversation:
         # limit. If left as None the legacy threshold-based rule is
         # used, keeping old call sites behaving identically.
         self._compaction_buffer_tokens = compaction_buffer_tokens
+        # Ratio component of the hybrid buffer. Combines additively with
+        # _compaction_buffer_tokens so callers can express "reserve N tokens
+        # plus M% of the window" — the absolute floor matters on tiny
+        # windows, the ratio matters on large ones.
+        self._compaction_buffer_ratio = compaction_buffer_ratio
         self._compaction_warning_buffer_tokens = compaction_warning_buffer_tokens
         self._output_keys = output_keys
         self._store = store
@@ -453,15 +469,56 @@ class NodeConversation:
 
     @property
     def system_prompt(self) -> str:
+        """Full concatenated system prompt (static + dynamic suffix, if any).
+
+        This is the canonical form used for persistence and for the legacy
+        single-block LLM path. Split-prompt callers should read
+        ``system_prompt_static`` and ``system_prompt_dynamic_suffix`` instead.
+        """
         return self._system_prompt
 
-    def update_system_prompt(self, new_prompt: str) -> None:
+    @property
+    def system_prompt_static(self) -> str:
+        """Static prefix of the system prompt (cache-stable).
+
+        Equals ``system_prompt`` when no split is in use. When the AgentLoop
+        calls ``update_system_prompt(static, dynamic_suffix=...)``, this is
+        the piece sent as the cache-controlled first block.
+        """
+        return self._system_prompt_static
+
+    @property
+    def system_prompt_dynamic_suffix(self) -> str:
+        """Dynamic tail of the system prompt (not cached).
+
+        Empty unless the consumer splits its prompt. The LLM wrapper uses a
+        non-empty suffix to emit a two-block system content list with a
+        cache breakpoint between the static prefix and this tail.
+        """
+        return self._system_prompt_dynamic_suffix
+
+    def update_system_prompt(self, new_prompt: str, dynamic_suffix: str | None = None) -> None:
         """Update the system prompt.
 
         Used in continuous conversation mode at phase transitions to swap
         Layer 3 (focus) while preserving the conversation history.
+
+        When ``dynamic_suffix`` is provided, ``new_prompt`` is interpreted as
+        the STATIC prefix and ``dynamic_suffix`` as the per-turn tail; they
+        travel to the LLM as two separate cache-controlled blocks but are
+        persisted as a single concatenated string for backward-compat
+        restore. ``new_prompt`` alone (suffix left None) keeps the legacy
+        single-string behavior.
         """
-        self._system_prompt = new_prompt
+        if dynamic_suffix is None:
+            # Legacy single-string path — static == full, no suffix split.
+            self._system_prompt = new_prompt
+            self._system_prompt_static = new_prompt
+            self._system_prompt_dynamic_suffix = ""
+        else:
+            self._system_prompt_static = new_prompt
+            self._system_prompt_dynamic_suffix = dynamic_suffix
+            self._system_prompt = f"{new_prompt}\n\n{dynamic_suffix}" if dynamic_suffix else new_prompt
         self._meta_persisted = False  # re-persist with new prompt
 
     def set_current_phase(self, phase_id: str) -> None:
@@ -847,19 +904,30 @@ class NodeConversation:
         """True when the conversation should be compacted before the
         next LLM call.
 
-        Buffer-based rule (Gap 7): trigger when the current estimate
-        plus the configured buffer would exceed the hard context limit.
-        Prevents compaction from firing only AFTER we're already over
-        the wire and forced into a reactive binary-split pass.
+        Hybrid buffer rule: the headroom reserved before compaction fires
+        is the SUM of an absolute fixed component and a ratio of the hard
+        context limit:
 
-        When no buffer is configured, falls back to the multiplicative
-        threshold the old callers were built around.
+            effective_buffer = compaction_buffer_tokens
+                             + compaction_buffer_ratio * max_context_tokens
+
+        The fixed component gives a floor on tiny windows; the ratio
+        keeps the trigger meaningful on large windows where any constant
+        buffer becomes a rounding error (an 8k buffer is 75% on a 32k
+        window but 96% on a 200k window). Compaction fires when the
+        current estimate would consume more than (limit - effective_buffer).
+
+        When neither component is configured, falls back to the legacy
+        multiplicative threshold so old callers keep behaving identically.
         """
         if self._max_context_tokens <= 0:
             return False
-        if self._compaction_buffer_tokens is not None:
-            budget = self._max_context_tokens - self._compaction_buffer_tokens
-            return self.estimate_tokens() >= max(0, budget)
+        fixed = self._compaction_buffer_tokens
+        ratio = self._compaction_buffer_ratio
+        if fixed is not None or ratio is not None:
+            effective_buffer = (fixed or 0) + (ratio or 0.0) * self._max_context_tokens
+            budget = self._max_context_tokens - effective_buffer
+            return self.estimate_tokens() >= max(0.0, budget)
         return self.estimate_tokens() >= self._max_context_tokens * self._compaction_threshold
 
     def compaction_warning(self) -> bool:
@@ -1516,6 +1584,7 @@ class NodeConversation:
             "max_context_tokens": self._max_context_tokens,
             "compaction_threshold": self._compaction_threshold,
             "compaction_buffer_tokens": self._compaction_buffer_tokens,
+            "compaction_buffer_ratio": self._compaction_buffer_ratio,
             "compaction_warning_buffer_tokens": (self._compaction_warning_buffer_tokens),
             "output_keys": self._output_keys,
         }
@@ -1565,6 +1634,7 @@ class NodeConversation:
             store=store,
             run_id=run_id,
             compaction_buffer_tokens=meta.get("compaction_buffer_tokens"),
+            compaction_buffer_ratio=meta.get("compaction_buffer_ratio"),
             compaction_warning_buffer_tokens=meta.get("compaction_warning_buffer_tokens"),
         )
         conv._meta_persisted = True

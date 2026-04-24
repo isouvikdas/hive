@@ -53,6 +53,7 @@ class MockStreamingLLM(LLMProvider):
         system: str = "",
         tools: list[Tool] | None = None,
         max_tokens: int = 4096,
+        **kwargs,
     ) -> AsyncIterator:
         self.stream_calls.append({"messages": messages, "system": system, "tools": tools})
         if not self.scenarios:
@@ -1079,7 +1080,7 @@ class ErrorThenSuccessLLM(LLMProvider):
         self.success_scenario = success_scenario
         self._call_index = 0
 
-    async def stream(self, messages, system="", tools=None, max_tokens=4096):
+    async def stream(self, messages, system="", tools=None, max_tokens=4096, **kwargs):
         call_num = self._call_index
         self._call_index += 1
         if call_num < self.fail_count:
@@ -1201,7 +1202,7 @@ class TestTransientErrorRetry:
         class StreamErrorThenSuccessLLM(LLMProvider):
             model: str = "mock"
 
-            async def stream(self, messages, system="", tools=None, max_tokens=4096):
+            async def stream(self, messages, system="", tools=None, max_tokens=4096, **kwargs):
                 nonlocal call_index
                 idx = call_index
                 call_index += 1
@@ -1390,7 +1391,7 @@ class ToolRepeatLLM(LLMProvider):
         self.final_text = final_text
         self._call_index = 0
 
-    async def stream(self, messages, system="", tools=None, max_tokens=4096):
+    async def stream(self, messages, system="", tools=None, max_tokens=4096, **kwargs):
         idx = self._call_index
         self._call_index += 1
         # Which outer iteration we're in (2 calls per iteration)
@@ -1999,7 +2000,7 @@ class TestToolConcurrencyPartition:
             def __init__(self):
                 self._calls = 0
 
-            async def stream(self, messages, system="", tools=None, max_tokens=4096):
+            async def stream(self, messages, system="", tools=None, max_tokens=4096, **kwargs):
                 self._calls += 1
                 if self._calls == 1:
                     # Emit the tool call, stall, then finish.

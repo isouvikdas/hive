@@ -151,8 +151,11 @@ interface ChatPanelProps {
   onStartNewSession?: () => void;
   /** When true, disable the start-new-session button (request in flight). */
   startingNewSession?: boolean;
-  /** Cumulative LLM token usage for this session */
-  tokenUsage?: { input: number; output: number };
+  /** Cumulative LLM token usage for this session.
+   *  `cached` (cache reads) and `cacheCreated` (cache writes) are subsets of
+   *  `input` — providers count both inside prompt_tokens. Display them
+   *  separately; do not add to a total. */
+  tokenUsage?: { input: number; output: number; cached?: number; cacheCreated?: number; costUsd?: number };
   /** Optional action element rendered on the right side of the "Conversation" header */
   headerAction?: React.ReactNode;
 }
@@ -1482,11 +1485,41 @@ export default function ChatPanel({
                 Context: {fmt(queenUsage.estimatedTokens)}/{fmt(queenUsage.maxTokens)}
               </span>
             )}
-            {hasTokens && (
-              <span title="LLM tokens used this session (input + output)">
-                Tokens: {fmt(tokenUsage!.input + tokenUsage!.output)}
-              </span>
-            )}
+            {hasTokens && (() => {
+              const cached = tokenUsage!.cached ?? 0;
+              const created = tokenUsage!.cacheCreated ?? 0;
+              const cost = tokenUsage!.costUsd ?? 0;
+              // cached/created are subsets of input — never sum; surface separately.
+              // Cost can be < $0.01; show 4 decimals so small-model sessions aren't "$0.00".
+              const costStr = cost > 0 ? `$${cost.toFixed(4)}` : "—";
+              return (
+                <span className="group relative cursor-help transition-colors hover:text-muted-foreground">
+                  Tokens: {fmt(tokenUsage!.output)}
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none invisible absolute bottom-full right-0 z-50 mb-2 whitespace-nowrap rounded-md border border-border bg-popover px-3 py-2 text-[11px] text-popover-foreground opacity-0 shadow-lg transition-[opacity,transform] duration-150 translate-y-1 group-hover:visible group-hover:opacity-100 group-hover:translate-y-0"
+                  >
+                    <span className="mb-1.5 block text-muted-foreground">
+                      LLM tokens used this session
+                    </span>
+                    <span className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 tabular-nums">
+                      <span>Input</span>
+                      <span className="text-right">{fmt(tokenUsage!.input)}</span>
+                      <span className="pl-3 text-muted-foreground">cache read</span>
+                      <span className="text-right text-muted-foreground">{fmt(cached)}</span>
+                      <span className="pl-3 text-muted-foreground">cache write</span>
+                      <span className="text-right text-muted-foreground">{fmt(created)}</span>
+                      <span>Output</span>
+                      <span className="text-right">{fmt(tokenUsage!.output)}</span>
+                      <span className="mt-1 border-t border-border/50 pt-1">Cost</span>
+                      <span className="mt-1 border-t border-border/50 pt-1 text-right font-medium">
+                        {costStr}
+                      </span>
+                    </span>
+                  </span>
+                </span>
+              );
+            })()}
           </div>
         );
       })()}

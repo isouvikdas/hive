@@ -23,9 +23,14 @@ from framework.llm.anthropic import AnthropicProvider
 from framework.llm.litellm import (
     OPENROUTER_TOOL_COMPAT_MODEL_CACHE,
     LiteLLMProvider,
+    _build_system_message,
     _compute_retry_delay,
+    _cost_from_tokens,
     _ensure_ollama_chat_prefix,
+    _extract_cache_tokens,
+    _extract_cost,
     _is_ollama_model,
+    _model_supports_cache_control,
     _summarize_request_for_log,
 )
 from framework.llm.provider import LLMProvider, LLMResponse, Tool
@@ -1192,3 +1197,441 @@ class TestGetLlmExtraKwargsOllama:
         with patch("framework.config.get_hive_config", return_value={}):
             result = get_llm_extra_kwargs()
         assert result == {}
+
+
+class TestModelSupportsCacheControl:
+    """`cache_control` allowlist covers native providers AND OpenRouter sub-providers
+    whose upstream API honors the marker (Anthropic, Gemini, GLM, MiniMax).
+    Auto-cache sub-providers (OpenAI, DeepSeek, Grok, Moonshot, Groq) are
+    intentionally excluded: sending cache_control is a no-op and a false win."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "anthropic/claude-opus-4-5",
+            "claude-3-5-sonnet-20241022",
+            "minimax/minimax-text-01",
+            "MiniMax-Text-01",
+            "zai-glm-4.6",
+            "glm-4.6",
+            "openrouter/anthropic/claude-opus-4.5",
+            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/google/gemini-2.5-pro",
+            "openrouter/google/gemini-2.5-flash",
+            "openrouter/z-ai/glm-5.1",
+            "openrouter/z-ai/glm-4.6",
+            "openrouter/minimax/minimax-text-01",
+        ],
+    )
+    def test_supported(self, model):
+        assert _model_supports_cache_control(model) is True
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-4o-mini",
+            "gemini/gemini-1.5-flash",
+            "ollama_chat/llama3",
+            "openrouter/openai/gpt-4o",
+            "openrouter/deepseek/deepseek-chat",
+            "openrouter/x-ai/grok-2",
+            "openrouter/moonshotai/kimi-k2",
+            "openrouter/liquid/lfm-2.5-1.2b-thinking:free",
+        ],
+    )
+    def test_unsupported(self, model):
+        assert _model_supports_cache_control(model) is False
+
+
+class TestBuildSystemMessageOpenRouter:
+    """`_build_system_message` should split static/dynamic blocks whenever
+    the model — native OR OpenRouter-routed — supports cache_control."""
+
+    def test_openrouter_anthropic_splits_into_two_blocks(self):
+        msg = _build_system_message(
+            system="static prefix",
+            system_dynamic_suffix="dynamic tail",
+            model="openrouter/anthropic/claude-opus-4.5",
+        )
+        assert msg == {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "static prefix",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": "dynamic tail"},
+            ],
+        }
+
+    def test_openrouter_gemini_splits_into_two_blocks(self):
+        msg = _build_system_message(
+            system="static prefix",
+            system_dynamic_suffix="dynamic tail",
+            model="openrouter/google/gemini-2.5-pro",
+        )
+        assert isinstance(msg["content"], list)
+        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert msg["content"][1] == {"type": "text", "text": "dynamic tail"}
+
+    def test_openrouter_glm_splits_into_two_blocks(self):
+        msg = _build_system_message(
+            system="static prefix",
+            system_dynamic_suffix="dynamic tail",
+            model="openrouter/z-ai/glm-5.1",
+        )
+        assert isinstance(msg["content"], list)
+        assert msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_openrouter_openai_stays_concatenated(self):
+        """OpenAI via OpenRouter auto-caches; sending cache_control is a no-op."""
+        msg = _build_system_message(
+            system="static prefix",
+            system_dynamic_suffix="dynamic tail",
+            model="openrouter/openai/gpt-4o",
+        )
+        assert msg == {
+            "role": "system",
+            "content": "static prefix\n\ndynamic tail",
+        }
+
+    def test_no_suffix_anthropic_gets_top_level_cache_control(self):
+        msg = _build_system_message(
+            system="static prefix",
+            system_dynamic_suffix=None,
+            model="openrouter/anthropic/claude-opus-4.5",
+        )
+        assert msg == {
+            "role": "system",
+            "content": "static prefix",
+            "cache_control": {"type": "ephemeral"},
+        }
+
+
+class TestOpenRouterToolCompatCacheControl:
+    """Tool-compat path must pass cache_control through when the routed
+    sub-provider honors it. Before this, the queen persona+tool-list prefix
+    was recomputed every turn on Anthropic/GLM via OpenRouter."""
+
+    def test_tool_compat_messages_split_for_cache_capable_model(self):
+        provider = LiteLLMProvider(
+            model="openrouter/anthropic/claude-opus-4.5",
+            api_key="test-key",
+        )
+        tools = [
+            Tool(
+                name="web_search",
+                description="Search the web",
+                parameters={"properties": {"query": {"type": "string"}}, "required": ["query"]},
+            )
+        ]
+
+        full_messages = provider._build_openrouter_tool_compat_messages(
+            messages=[{"role": "user", "content": "hi"}],
+            system="You are a queen.",
+            tools=tools,
+            system_dynamic_suffix="Current time: 2026-04-23T00:00:00Z",
+        )
+
+        system_msg = full_messages[0]
+        assert system_msg["role"] == "system"
+        assert isinstance(system_msg["content"], list)
+        assert len(system_msg["content"]) == 2
+
+        static_block = system_msg["content"][0]
+        assert static_block["cache_control"] == {"type": "ephemeral"}
+        assert "You are a queen." in static_block["text"]
+        assert "Tool compatibility mode is active" in static_block["text"]
+        assert "web_search" in static_block["text"]
+        assert "2026-04-23" not in static_block["text"]
+
+        dynamic_block = system_msg["content"][1]
+        assert "cache_control" not in dynamic_block
+        assert dynamic_block["text"] == "Current time: 2026-04-23T00:00:00Z"
+
+    def test_tool_compat_messages_stay_concatenated_for_liquid(self):
+        """Liquid (and other non-cache-control OR sub-providers) keep legacy behavior."""
+        provider = LiteLLMProvider(
+            model="openrouter/liquid/lfm-2.5-1.2b-thinking:free",
+            api_key="test-key",
+        )
+        tools = [
+            Tool(
+                name="web_search",
+                description="Search the web",
+                parameters={"properties": {"query": {"type": "string"}}, "required": ["query"]},
+            )
+        ]
+
+        full_messages = provider._build_openrouter_tool_compat_messages(
+            messages=[{"role": "user", "content": "hi"}],
+            system="You are a queen.",
+            tools=tools,
+            system_dynamic_suffix="Current time: 2026-04-23T00:00:00Z",
+        )
+
+        system_msg = full_messages[0]
+        assert isinstance(system_msg["content"], str)
+        assert "2026-04-23" in system_msg["content"]
+        assert "cache_control" not in system_msg
+
+
+class TestExtractCacheTokens:
+    """`_extract_cache_tokens` reads cache_read + cache_creation from the
+    LiteLLM-normalized usage object. Both fields are subsets of
+    ``prompt_tokens`` — the helper surfaces them for display, the call sites
+    are responsible for never adding them to a total."""
+
+    def test_none_usage_returns_zero(self):
+        assert _extract_cache_tokens(None) == (0, 0)
+
+    def test_openai_shape(self):
+        """Pure OpenAI responses expose cached reads via
+        ``prompt_tokens_details.cached_tokens`` and have no cache write
+        field at all (OpenAI's automatic caching is read-only from the
+        client's perspective)."""
+        usage = MagicMock(spec=["prompt_tokens_details", "cache_creation_input_tokens"])
+        usage.prompt_tokens_details = MagicMock(
+            spec=["cached_tokens"], cached_tokens=120,
+        )
+        usage.cache_creation_input_tokens = 0
+        cache_read, cache_creation = _extract_cache_tokens(usage)
+        assert cache_read == 120
+        assert cache_creation == 0
+
+    def test_openrouter_cache_write_tokens_shape(self):
+        """OpenRouter normalizes cache writes into
+        ``prompt_tokens_details.cache_write_tokens`` (verified empirically
+        against openrouter/anthropic and openrouter/z-ai responses). The
+        legacy ``usage.cache_creation_input_tokens`` field is NOT set on
+        OpenRouter responses, so this is the path that matters in practice."""
+        usage = MagicMock()
+        usage.prompt_tokens_details = MagicMock(
+            cached_tokens=80, cache_write_tokens=50,
+        )
+        # Explicitly set the Anthropic-native field to 0 to prove we don't
+        # depend on it for OpenRouter responses.
+        usage.cache_creation_input_tokens = 0
+        cache_read, cache_creation = _extract_cache_tokens(usage)
+        assert cache_read == 80
+        assert cache_creation == 50
+
+    def test_anthropic_native_cache_creation_field_still_works(self):
+        """Direct Anthropic API responses (not via OpenRouter) put cache
+        writes on the top-level ``cache_creation_input_tokens`` field. Keep
+        the fallback so non-OpenRouter Anthropic continues to work."""
+        usage = MagicMock(spec=["prompt_tokens_details", "cache_creation_input_tokens"])
+        usage.prompt_tokens_details = MagicMock(
+            spec=["cached_tokens"], cached_tokens=80,
+        )
+        usage.cache_creation_input_tokens = 50
+        cache_read, cache_creation = _extract_cache_tokens(usage)
+        assert cache_read == 80
+        assert cache_creation == 50
+
+    def test_raw_anthropic_shape_falls_back(self):
+        """Raw Anthropic usage (no prompt_tokens_details) — fall back to
+        cache_read_input_tokens."""
+        usage = MagicMock(spec=["cache_read_input_tokens", "cache_creation_input_tokens"])
+        usage.cache_read_input_tokens = 200
+        usage.cache_creation_input_tokens = 75
+        # Force prompt_tokens_details to be missing on the spec'd mock.
+        cache_read, cache_creation = _extract_cache_tokens(usage)
+        assert cache_read == 200
+        assert cache_creation == 75
+
+    def test_no_cache_fields_returns_zero(self):
+        """A provider that doesn't report cache tokens at all (e.g. Gemini)
+        returns (0, 0) — never raises."""
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        cache_read, cache_creation = _extract_cache_tokens(usage)
+        assert cache_read == 0
+        assert cache_creation == 0
+
+
+class TestStreamingChunksFallbackPreservesCacheFields:
+    """Regression: when LiteLLM strips usage from yielded streaming chunks,
+    we fall back to ``response.chunks`` to recover token totals. LiteLLM's
+    own ``calculate_total_usage()`` aggregates ``prompt_tokens`` /
+    ``completion_tokens`` correctly but DROPS ``prompt_tokens_details`` —
+    which is where OpenRouter places ``cached_tokens`` and
+    ``cache_write_tokens``. The fallback path must walk the raw chunks to
+    recover those fields, otherwise streaming OpenRouter calls always
+    report zero cache tokens. (Verified empirically against
+    openrouter/anthropic/* and openrouter/z-ai/*.)"""
+
+    def test_chunks_with_cache_fields_recovered(self):
+        """Simulate the chunks-fallback hot path: build raw chunks where the
+        last one carries cache_write_tokens, run the same recovery loop the
+        streaming code uses, and assert we surface the cache fields."""
+        # Three chunks: text deltas, then a final chunk with usage.
+        empty_usage_chunk = MagicMock()
+        empty_usage_chunk.usage = None
+        last_chunk = MagicMock()
+        last_chunk.usage = MagicMock()
+        last_chunk.usage.prompt_tokens_details = MagicMock(
+            cached_tokens=0, cache_write_tokens=5601,
+        )
+        last_chunk.usage.cache_creation_input_tokens = 0
+        chunks = [empty_usage_chunk, empty_usage_chunk, last_chunk]
+
+        # Mirror the production loop in litellm.py's chunks-fallback.
+        cached, creation = 0, 0
+        for raw in reversed(chunks):
+            usage = getattr(raw, "usage", None)
+            if usage is None:
+                continue
+            cr, cc = _extract_cache_tokens(usage)
+            if cr or cc:
+                cached, creation = cr, cc
+                break
+
+        assert cached == 0
+        assert creation == 5601, (
+            "chunks-fallback must recover cache_write_tokens from the raw "
+            "chunk, not from calculate_total_usage which strips details"
+        )
+
+    def test_chunks_with_cache_read_recovered(self):
+        """Same path, but for a cache HIT (cached_tokens populated)."""
+        last_chunk = MagicMock()
+        last_chunk.usage = MagicMock()
+        last_chunk.usage.prompt_tokens_details = MagicMock(
+            cached_tokens=5601, cache_write_tokens=0,
+        )
+        last_chunk.usage.cache_creation_input_tokens = 0
+
+        cached, creation = 0, 0
+        for raw in reversed([last_chunk]):
+            usage = getattr(raw, "usage", None)
+            if usage is None:
+                continue
+            cr, cc = _extract_cache_tokens(usage)
+            if cr or cc:
+                cached, creation = cr, cc
+                break
+
+        assert cached == 5601
+        assert creation == 0
+
+
+class TestExtractCost:
+    """`_extract_cost` pulls USD cost from three sources in order:
+    usage.cost (OpenRouter native / include_cost_in_streaming_usage) →
+    response._hidden_params['response_cost'] (LiteLLM logging) →
+    litellm.completion_cost() (pricing-table fallback)."""
+
+    def test_none_response_returns_zero(self):
+        assert _extract_cost(None, "gpt-4o-mini") == 0.0
+
+    def test_openrouter_usage_cost_is_preferred(self):
+        """OpenRouter returns authoritative per-call cost on usage.cost when
+        the caller opts in (usage.include=true). That beats LiteLLM's
+        pricing-table estimate because it reflects promo pricing and BYOK markup."""
+        response = MagicMock()
+        response.usage = MagicMock(cost=0.00123)
+        response._hidden_params = {"response_cost": 99.99}  # should be ignored
+        assert _extract_cost(response, "openrouter/anthropic/claude-opus-4.5") == 0.00123
+
+    def test_hidden_params_response_cost_used_when_no_usage_cost(self):
+        """LiteLLM's logging layer attaches response_cost after most
+        completions — this is how OpenAI/Anthropic responses get costed
+        without going back to the pricing table."""
+        response = MagicMock()
+        response.usage = MagicMock(spec=[])  # no .cost attribute
+        response._hidden_params = {"response_cost": 0.0042}
+        assert _extract_cost(response, "gpt-4o-mini") == 0.0042
+
+    def test_falls_back_to_completion_cost_when_nothing_pre_populated(self):
+        """For providers where LiteLLM didn't pre-populate cost, call
+        litellm.completion_cost() against the pricing table. Mocked here
+        because we don't want tests depending on the exact price of
+        claude-sonnet-4.5 in LiteLLM's model map."""
+        response = MagicMock()
+        response.usage = MagicMock(spec=[])
+        response._hidden_params = {}
+        with patch("litellm.completion_cost", return_value=0.00789):
+            assert _extract_cost(response, "anthropic/claude-sonnet-4.5") == 0.00789
+
+    def test_completion_cost_exception_returns_zero(self):
+        """Unpriced models (e.g. new OpenRouter routes not yet in LiteLLM's
+        catalog) must not crash the hot path."""
+        response = MagicMock()
+        response.usage = MagicMock(spec=[])
+        response._hidden_params = {}
+        with patch("litellm.completion_cost", side_effect=Exception("no pricing")):
+            assert _extract_cost(response, "openrouter/mystery/model") == 0.0
+
+    def test_zero_cost_falls_through_to_next_source(self):
+        """usage.cost == 0 should NOT short-circuit; fall through to
+        _hidden_params / completion_cost so we don't cement a false zero."""
+        response = MagicMock()
+        response.usage = MagicMock(cost=0.0)
+        response._hidden_params = {"response_cost": 0.0055}
+        assert _extract_cost(response, "gpt-4o-mini") == 0.0055
+
+
+class TestCostFromTokens:
+    """`_cost_from_tokens` is the streaming-path cost helper: stream wrappers
+    don't expose the full ModelResponse shape that completion_cost() expects,
+    so we go through cost_per_token() with the already-extracted totals."""
+
+    def test_zero_tokens_returns_zero_without_calling_litellm(self):
+        with patch("litellm.cost_per_token") as mock:
+            assert _cost_from_tokens("claude-opus-4.5", 0, 0) == 0.0
+            mock.assert_not_called()
+
+    def test_empty_model_returns_zero(self):
+        assert _cost_from_tokens("", 1000, 500) == 0.0
+
+    def test_computes_from_tokens(self):
+        with patch("litellm.cost_per_token", return_value=(0.001, 0.002)) as mock:
+            cost = _cost_from_tokens(
+                "anthropic/claude-opus-4.5",
+                input_tokens=1000,
+                output_tokens=500,
+                cached_tokens=200,
+                cache_creation_tokens=100,
+            )
+        assert cost == pytest.approx(0.003)
+        # Verify the cache-aware kwargs are threaded through — Anthropic
+        # needs these to apply the 1.25x write / 0.1x read multipliers.
+        call_kwargs = mock.call_args.kwargs
+        assert call_kwargs["prompt_tokens"] == 1000
+        assert call_kwargs["completion_tokens"] == 500
+        assert call_kwargs["cache_read_input_tokens"] == 200
+        assert call_kwargs["cache_creation_input_tokens"] == 100
+
+    def test_exception_returns_zero(self):
+        with patch("litellm.cost_per_token", side_effect=Exception("unpriced")):
+            assert _cost_from_tokens("mystery/model", 1000, 500) == 0.0
+
+    def test_negative_or_none_components_coerce_to_zero(self):
+        """LiteLLM returns (None, None) for unknown models in some versions;
+        treat as 0 rather than crashing on None+None."""
+        with patch("litellm.cost_per_token", return_value=(None, None)):
+            assert _cost_from_tokens("some/model", 1, 1) == 0.0
+
+
+class TestLLMResponseAndFinishEventHaveCostUsd:
+    """Regression: both LLMResponse and FinishEvent must carry cost_usd so
+    the agent loop → event bus → frontend pipeline doesn't lose cost."""
+
+    def test_llm_response_defaults_cost_to_zero(self):
+        from framework.llm.provider import LLMResponse
+
+        r = LLMResponse(content="", model="m")
+        assert r.cost_usd == 0.0
+
+    def test_finish_event_defaults_cost_to_zero(self):
+        from framework.llm.stream_events import FinishEvent
+
+        e = FinishEvent()
+        assert e.cost_usd == 0.0
+
+    def test_finish_event_accepts_cost(self):
+        from framework.llm.stream_events import FinishEvent
+
+        e = FinishEvent(cost_usd=0.0123)
+        assert e.cost_usd == 0.0123

@@ -122,8 +122,19 @@ async def handle_create_session(request: web.Request) -> web.Response:
     (equivalent to the old POST /api/agents). Otherwise creates a queen-only
     session that can later have a colony loaded via POST /sessions/{id}/colony.
     """
+    from framework.agents.queen.queen_profiles import ensure_default_queens, load_queen_profile
+    from framework.tools.queen_lifecycle_tools import QUEEN_PHASES
+
     manager = _get_manager(request)
-    body = await request.json() if request.can_read_body else {}
+    if request.can_read_body:
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "Request body must be a JSON object"}, status=400)
+    else:
+        body = {}
     agent_path = body.get("agent_path")
     agent_id = body.get("agent_id")
     session_id = body.get("session_id")
@@ -133,6 +144,21 @@ async def handle_create_session(request: web.Request) -> web.Response:
     queen_name = body.get("queen_name")
     initial_phase = body.get("initial_phase")
     worker_name = body.get("worker_name")
+
+    if initial_phase is not None and initial_phase not in QUEEN_PHASES:
+        return web.json_response(
+            {
+                "error": f"Invalid initial_phase '{initial_phase}'",
+                "valid": sorted(QUEEN_PHASES),
+            },
+            status=400,
+        )
+    if queen_name:
+        ensure_default_queens()
+        try:
+            load_queen_profile(queen_name)
+        except FileNotFoundError:
+            return web.json_response({"error": f"Queen '{queen_name}' not found"}, status=404)
 
     if agent_path:
         try:
@@ -160,6 +186,7 @@ async def handle_create_session(request: web.Request) -> web.Response:
                 model=model,
                 initial_prompt=initial_prompt,
                 queen_resume_from=queen_resume_from,
+                queen_name=queen_name,
                 initial_phase=initial_phase,
             )
     except ValueError as e:

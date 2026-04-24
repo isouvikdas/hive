@@ -108,6 +108,8 @@ async def publish_llm_turn_complete(
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cost_usd: float = 0.0,
     execution_id: str = "",
     iteration: int | None = None,
 ) -> None:
@@ -120,6 +122,8 @@ async def publish_llm_turn_complete(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cost_usd=cost_usd,
             execution_id=execution_id,
             iteration=iteration,
         )

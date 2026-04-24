@@ -809,16 +809,28 @@ class EventBus:
         input_tokens: int,
         output_tokens: int,
         cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        cost_usd: float = 0.0,
         execution_id: str | None = None,
         iteration: int | None = None,
     ) -> None:
-        """Emit LLM turn completion with stop reason and model metadata."""
+        """Emit LLM turn completion with stop reason and model metadata.
+
+        ``cached_tokens`` and ``cache_creation_tokens`` are subsets of
+        ``input_tokens`` (already inside provider ``prompt_tokens``).
+        Subscribers should display them, not add them to a total.
+
+        ``cost_usd`` is the USD cost for this turn when known (Anthropic,
+        OpenAI, OpenRouter). 0.0 means unreported (not free).
+        """
         data: dict = {
             "stop_reason": stop_reason,
             "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cached_tokens": cached_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+            "cost_usd": cost_usd,
         }
         if iteration is not None:
             data["iteration"] = iteration

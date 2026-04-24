@@ -653,9 +653,16 @@ class AntigravityProvider(LLMProvider):
         system: str = "",
         tools: list[Tool] | None = None,
         max_tokens: int = 4096,
+        system_dynamic_suffix: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         import asyncio  # noqa: PLC0415
         import concurrent.futures  # noqa: PLC0415
+
+        # Antigravity (Google's proprietary endpoint) doesn't expose a
+        # cache_control hook. Concatenate the dynamic suffix so its shape
+        # matches the legacy single-string call site.
+        if system_dynamic_suffix:
+            system = f"{system}\n\n{system_dynamic_suffix}" if system else system_dynamic_suffix
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
