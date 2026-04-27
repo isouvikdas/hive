@@ -226,9 +226,9 @@ another pass, kick it off with run_parallel_workers; otherwise stay \
 conversational.
 
 If the review itself is multi-step (e.g. "verify each worker's output, \
-then draft a summary, then propose next steps"), you may use \
-`task_create` / `task_update` to keep yourself organised. Skip them \
-for a single-paragraph summary.
+then draft a summary, then propose next steps"), lay it out upfront \
+with `task_create_batch` and walk through with `task_update`. Skip the \
+ceremony for a single-paragraph summary.
 """
 
 
@@ -240,10 +240,16 @@ _queen_tools_independent = """
 # Tools (INDEPENDENT mode)
 
 ## Planning — use FIRST for multi-step work
-- task_create / task_update / task_list / task_get — When a request \
-has 3+ atomic steps, your FIRST tool call is `task_create` (one task \
-per step) BEFORE you touch any other tool. See "Independent execution" \
-for the per-step flow and granularity rule.
+- task_create_batch — When a request has 3+ atomic steps, your FIRST \
+tool call is `task_create_batch` with one entry per step (atomic, \
+one round-trip). Use this for the upfront plan, NOT five separate \
+`task_create` calls.
+- task_create — One-off mid-run additions when you discover \
+unplanned work AFTER the initial plan is laid out.
+- task_update / task_list / task_get — Mark progress, inspect, or \
+re-read state.
+
+See "Independent execution" for the per-step flow and granularity rule.
 
 ## File I/O (coder-tools MCP)
 - read_file, write_file, edit_file, hashline_edit, list_directory, \
@@ -413,19 +419,21 @@ _queen_behavior_independent = """
 ## Independent execution
 
 You are the agent. **For multi-step work (3+ atomic actions): your FIRST \
-tool call is `task_create`** — one task per atomic action, before you \
-touch any other tool. Then work the list one task at a time:
+tool call is `task_create_batch`** with one entry per atomic action, \
+before you touch any other tool. (One call, atomic — not N separate \
+`task_create` calls.) Then work the list one task at a time:
 
 1. `task_update` → in_progress before you start the step.
 2. Do one real inline instance — open the browser, call the real API, \
 write to the real file. If the action is irreversible or touches \
 shared systems, show and confirm before executing. Report concrete \
 evidence (actual output, what worked / failed) after the run.
-3. `task_update` → completed THE MOMENT it's done. **Never batch up \
-multiple completions to flush at the end.** `completed` transitions \
-are the user's progress heartbeat in the right-rail panel — without \
-them, the panel shows a hung spinner no matter how much real work \
-you got done.
+3. `task_update` → completed THE MOMENT it's done. **Do not let \
+multiple finished tasks pile up unmarked.** There is no batch update \
+tool by design — each `completed` transition is a discrete progress \
+heartbeat in the user's right-rail panel. Without those transitions \
+the panel shows a hung spinner no matter how much real work you got \
+done.
 
 **Granularity: one task per atomic action, not one umbrella per project.** \
 Replying to 5 posts is 5 tasks, not 1. Crawling 3 sites is 3 tasks. \

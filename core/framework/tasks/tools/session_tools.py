@@ -117,31 +117,68 @@ def _get_schema() -> dict[str, Any]:
     }
 
 
+def _create_batch_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "minItems": 1,
+                "description": (
+                    "Array of task specs. Each becomes one task with a "
+                    "sequential id. Atomic — all created or none."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {
+                            "type": "string",
+                            "description": "Imperative title (e.g. 'Crawl target URL').",
+                        },
+                        "description": {"type": "string"},
+                        "active_form": {
+                            "type": "string",
+                            "description": (
+                                "Present-continuous label shown while in_progress."
+                            ),
+                        },
+                        "metadata": {"type": "object"},
+                    },
+                    "required": ["subject"],
+                },
+            }
+        },
+        "required": ["tasks"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool descriptions
 # ---------------------------------------------------------------------------
 
 _CREATE_DESC = (
-    "Create a task on your own session task list to break down and track "
-    "multi-step work. Use when you have 3+ distinct steps, non-trivial "
-    "planning, or the user explicitly asks for tracked progress. Capture "
-    "tasks IMMEDIATELY after receiving instructions — don't narrate intent. "
-    "DO NOT use this for: a single trivial task, purely conversational "
-    "replies, greetings, or work that fits in one tool call. The user "
-    "sees this list live in the right rail.\n\n"
+    "Create ONE task on your own session task list. Use this for one-off "
+    "mid-run additions when you discover unplanned work after the initial "
+    "plan is laid out.\n\n"
+    "**For laying out a multi-step plan upfront, use `task_create_batch` "
+    "instead** — one tool call with all the steps is cheaper and atomic.\n\n"
     "Fields:\n"
-    "- subject: short imperative title (e.g. 'Crawl target URLs').\n"
+    "- subject: short imperative title (e.g. 'Crawl target URL').\n"
     "- description: optional, slightly longer 'what to do' note.\n"
     "- active_form: present-continuous label shown while in_progress (e.g. "
-    "'Crawling target URLs'). If omitted, the spinner shows the subject.\n"
+    "'Crawling target URL'). If omitted, the spinner shows the subject.\n"
     "- metadata: optional KV. Set _internal=true to hide from task_list."
 )
 
 _UPDATE_DESC = (
-    "Update a task on your own session task list. Workflow:\n"
+    "Update ONE task on your own session task list. There is no batch "
+    "update tool by design — every `completed` transition is a discrete "
+    "progress signal to the user.\n\n"
+    "Workflow:\n"
     "- Mark a task `in_progress` BEFORE you start working on it.\n"
-    "- Mark it `completed` AS SOON as you finish it — never batch up "
-    "  multiple completions to flush at the end.\n"
+    "- Mark it `completed` AS SOON as you finish it — do not let "
+    "multiple finished tasks pile up unmarked before flushing them at "
+    "the end of the run.\n"
     "- Set status='deleted' to drop a task that's no longer relevant.\n\n"
     "ONLY mark `completed` when the task is FULLY done. If you hit errors, "
     "blockers, or partial state, keep it `in_progress` and create a new "
@@ -161,6 +198,15 @@ _GET_DESC = (
     "Read the full record of one task (description, metadata, timestamps) "
     "from your own session task list. Use this to refresh your view of a "
     "task before updating it if you're not sure of current fields."
+)
+
+_CREATE_BATCH_DESC = (
+    "Create N tasks at once on your own session task list. **Use this "
+    "FIRST when laying out a multi-step plan upfront** — replying to 5 "
+    "posts is one `task_create_batch` with 5 entries, not 5 separate "
+    "`task_create` calls. Atomic: all-or-none. Use single `task_create` "
+    "for one-off mid-run additions when you discover unplanned work, "
+    "not for the initial plan."
 )
 
 
@@ -222,6 +268,77 @@ def _make_create_executor(store: TaskStore):
             "task_id": rec.id,
             "message": f"Task #{rec.id} created successfully: {rec.subject}",
             "task": _serialize_task(rec),
+        }
+
+    return execute
+
+
+def _make_create_batch_executor(store: TaskStore):
+    async def execute(inputs: dict) -> dict[str, Any]:
+        list_id = _resolve_list_id()
+        if not list_id:
+            return {"success": False, "error": "No task_list_id resolved for this agent."}
+        agent_id = current_agent_id() or ""
+        specs = inputs.get("tasks") or []
+        if not isinstance(specs, list) or not specs:
+            return {
+                "success": False,
+                "error": "task_create_batch requires a non-empty `tasks` array.",
+            }
+        # Storage layer validates subject; surface its error as a soft
+        # tool_result so sibling tools don't cancel.
+        try:
+            recs = await store.create_tasks_batch(list_id, specs)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
+
+        # Run task_created hooks per task; blocking on any aborts the
+        # whole batch (delete every record we just wrote, return error).
+        for rec in recs:
+            try:
+                await run_task_hooks(
+                    HOOK_TASK_CREATED,
+                    task_list_id=list_id,
+                    task=rec,
+                    agent_id=agent_id,
+                )
+            except BlockingHookError as exc:
+                logger.warning(
+                    "task_created hook blocked batch on task #%s: %s",
+                    rec.id,
+                    exc,
+                )
+                for r in recs:
+                    await store.delete_task(list_id, r.id)
+                return {
+                    "success": False,
+                    "error": (
+                        f"Hook blocked task #{rec.id} ({rec.subject!r}); "
+                        f"entire batch rolled back: {exc}"
+                    ),
+                }
+
+        for rec in recs:
+            await emit_task_created(task_list_id=list_id, record=rec)
+
+        ids = [r.id for r in recs]
+        # Compact summary message — don't flood the conversation with
+        # one line per created task.
+        if len(ids) == 1:
+            range_label = f"#{ids[0]}"
+        elif ids == list(range(ids[0], ids[-1] + 1)):
+            range_label = f"#{ids[0]}-#{ids[-1]}"
+        else:
+            range_label = ", ".join(f"#{i}" for i in ids)
+        return {
+            "success": True,
+            "task_list_id": list_id,
+            "task_ids": ids,
+            "message": (
+                f"Created {len(ids)} task(s): {range_label}. "
+                f"Mark #{ids[0]} in_progress before starting it."
+            ),
+            "tasks": [_serialize_task(r) for r in recs],
         }
 
     return execute
@@ -426,9 +543,18 @@ class _OwnerSentinel:  # noqa: N801 — internal sentinel class
 def build_session_tools(
     store: TaskStore | None = None,
 ) -> list[tuple[Tool, Any]]:
-    """Build (Tool, executor) pairs for the four session task tools."""
+    """Build (Tool, executor) pairs for the session task tools."""
     s = store or get_task_store()
     return [
+        (
+            Tool(
+                name="task_create_batch",
+                description=_CREATE_BATCH_DESC,
+                parameters=_create_batch_schema(),
+                concurrency_safe=False,
+            ),
+            _make_create_batch_executor(s),
+        ),
         (
             Tool(
                 name="task_create",

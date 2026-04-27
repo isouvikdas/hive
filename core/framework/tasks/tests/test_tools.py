@@ -160,6 +160,133 @@ async def test_task_not_found_is_not_error(
 
 
 @pytest.mark.asyncio
+async def test_create_batch_creates_n_tasks_atomically(
+    registry_with_session_tools: ToolRegistry,
+) -> None:
+    reg = registry_with_session_tools
+    list_id = "session:agent_a:sess_1"
+    token = _set_ctx(agent_id="agent_a", task_list_id=list_id)
+    try:
+        result = await _invoke(
+            reg,
+            "task_create_batch",
+            tasks=[
+                {"subject": "step 1", "active_form": "Doing 1"},
+                {"subject": "step 2"},
+                {"subject": "step 3"},
+            ],
+        )
+        assert result.is_error is False
+        body = json.loads(result.content)
+        assert body["success"] is True
+        assert body["task_ids"] == [1, 2, 3]
+        # Compact summary message — references first id and the range.
+        assert "#1-#3" in body["message"] or "#1, #2, #3" in body["message"]
+        assert "Mark #1 in_progress" in body["message"]
+
+        # Sanity: list shows all three.
+        body2 = json.loads((await _invoke(reg, "task_list")).content)
+        assert body2["count"] == 3
+    finally:
+        ToolRegistry.reset_execution_context(token)
+
+
+@pytest.mark.asyncio
+async def test_create_batch_rejects_empty(
+    registry_with_session_tools: ToolRegistry,
+) -> None:
+    reg = registry_with_session_tools
+    token = _set_ctx(agent_id="a", task_list_id="session:a:s")
+    try:
+        result = await _invoke(reg, "task_create_batch", tasks=[])
+        body = json.loads(result.content)
+        assert body["success"] is False
+        assert "non-empty" in body["error"]
+    finally:
+        ToolRegistry.reset_execution_context(token)
+
+
+@pytest.mark.asyncio
+async def test_create_batch_rejects_malformed_spec_atomically(
+    registry_with_session_tools: ToolRegistry,
+) -> None:
+    """A bad subject in the middle of the batch must reject the whole
+    batch — not leave partial state on disk."""
+    reg = registry_with_session_tools
+    token = _set_ctx(agent_id="a", task_list_id="session:a:s")
+    try:
+        result = await _invoke(
+            reg,
+            "task_create_batch",
+            tasks=[{"subject": "good"}, {"subject": ""}],
+        )
+        body = json.loads(result.content)
+        assert body["success"] is False
+        # Confirm zero tasks landed.
+        body2 = json.loads((await _invoke(reg, "task_list")).content)
+        assert body2["count"] == 0
+    finally:
+        ToolRegistry.reset_execution_context(token)
+
+
+@pytest.mark.asyncio
+async def test_create_batch_hook_blocks_rolls_back_whole_batch(
+    registry_with_session_tools: ToolRegistry,
+) -> None:
+    """If a task_created hook blocks even one task in the batch, the
+    entire batch must roll back."""
+    reg = registry_with_session_tools
+
+    # Block on the second task only.
+    def selective_blocker(ctx) -> None:
+        if ctx.task.subject == "block me":
+            raise BlockingHookError("policy")
+
+    register_hook(HOOK_TASK_CREATED, selective_blocker)
+
+    token = _set_ctx(agent_id="a", task_list_id="session:a:s")
+    try:
+        result = await _invoke(
+            reg,
+            "task_create_batch",
+            tasks=[
+                {"subject": "ok 1"},
+                {"subject": "block me"},
+                {"subject": "ok 3"},
+            ],
+        )
+        body = json.loads(result.content)
+        assert body["success"] is False
+        assert "rolled back" in body["error"]
+        # All three rolled back.
+        body2 = json.loads((await _invoke(reg, "task_list")).content)
+        assert body2["count"] == 0
+    finally:
+        ToolRegistry.reset_execution_context(token)
+
+
+@pytest.mark.asyncio
+async def test_create_batch_then_single_create_keeps_id_monotonic(
+    registry_with_session_tools: ToolRegistry,
+) -> None:
+    """task_create_batch uses sequential ids; a follow-up task_create
+    should pick up at the next id after the batch's highest."""
+    reg = registry_with_session_tools
+    token = _set_ctx(agent_id="a", task_list_id="session:a:s")
+    try:
+        await _invoke(
+            reg,
+            "task_create_batch",
+            tasks=[{"subject": "a"}, {"subject": "b"}, {"subject": "c"}],
+        )
+        result = await _invoke(reg, "task_create", subject="d")
+        body = json.loads(result.content)
+        assert body["task_id"] == 4
+    finally:
+        ToolRegistry.reset_execution_context(token)
+
+
+@pytest.mark.asyncio
 async def test_completion_suffix_points_to_next_pending(
     registry_with_session_tools: ToolRegistry,
 ) -> None:

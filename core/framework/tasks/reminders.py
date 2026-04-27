@@ -86,7 +86,9 @@ def build_reminder(records: list[TaskRecord]) -> str:
         "before starting the next step. Don't batch completions.",
         "  - If you've finished work that wasn't on the list, add a "
         "task_create + task_update completed pair so the panel reflects it.",
-        "  - If you're umbrella-tracking ('reply to all posts' as one task), break it into one task per atomic action.",
+        "  - If you're umbrella-tracking ('reply to all posts' as one task), "
+        "break it into one task per atomic action — use `task_create_batch` "
+        "with one entry per action.",
     ]
     if in_progress:
         bullets.append(

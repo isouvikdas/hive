@@ -164,6 +164,27 @@ class TaskStore:
 
     # ----- task CRUD ----------------------------------------------------
 
+    async def create_tasks_batch(
+        self,
+        task_list_id: str,
+        specs: list[dict[str, Any]],
+    ) -> list[TaskRecord]:
+        """Atomically create N tasks under a single list-lock acquisition.
+
+        Each spec is a dict with keys: subject (required), description,
+        active_form, owner, metadata. Ids are assigned sequentially and
+        contiguously — if any task fails to write, an exception is raised
+        and the whole batch is rolled back (file unlinked, high-water-mark
+        kept at the prior value).
+
+        Atomic-or-none semantics matter for the tool surface: a failed
+        partial batch would leave the LLM reasoning about cleanup, which
+        defeats the point of batching as a single decision.
+        """
+        return await asyncio.to_thread(
+            self._create_tasks_batch_sync, task_list_id, specs
+        )
+
     async def create_task(
         self,
         task_list_id: str,
@@ -431,6 +452,70 @@ class TaskStore:
             if new_id > self._read_highwatermark_sync(task_list_id):
                 self._write_highwatermark_sync(task_list_id, new_id)
             return record
+
+    def _create_tasks_batch_sync(
+        self,
+        task_list_id: str,
+        specs: list[dict[str, Any]],
+    ) -> list[TaskRecord]:
+        if not specs:
+            return []
+        # Validate up-front so we don't half-create on a malformed entry.
+        for i, spec in enumerate(specs):
+            subj = spec.get("subject")
+            if not isinstance(subj, str) or not subj.strip():
+                raise ValueError(f"specs[{i}].subject must be a non-empty string")
+
+        with self._list_lock(task_list_id):
+            # Same lazy meta backfill as _create_task_sync.
+            if not self._meta_path(task_list_id).exists():
+                inferred_role = (
+                    TaskListRole.TEMPLATE
+                    if task_list_id.startswith("colony:")
+                    else TaskListRole.SESSION
+                )
+                self._write_meta_sync(
+                    task_list_id,
+                    TaskListMeta(task_list_id=task_list_id, role=inferred_role),
+                )
+
+            base_id = self._next_id_sync(task_list_id)
+            now = time.time()
+            records: list[TaskRecord] = []
+            for offset, spec in enumerate(specs):
+                rec = TaskRecord(
+                    id=base_id + offset,
+                    subject=spec["subject"],
+                    description=spec.get("description", ""),
+                    active_form=spec.get("active_form"),
+                    owner=spec.get("owner"),
+                    status=TaskStatus.PENDING,
+                    metadata=dict(spec.get("metadata") or {}),
+                    created_at=now,
+                    updated_at=now,
+                )
+                records.append(rec)
+
+            # Write all task files; on any failure, unlink everything we
+            # wrote so far and re-raise. High-water-mark is bumped only
+            # after a successful full-batch write.
+            written: list[Path] = []
+            try:
+                for rec in records:
+                    self._write_task_sync(task_list_id, rec)
+                    written.append(self._task_path(task_list_id, rec.id))
+            except Exception:
+                for path in written:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("Failed to roll back batch task at %s", path, exc_info=True)
+                raise
+
+            highest = records[-1].id
+            if highest > self._read_highwatermark_sync(task_list_id):
+                self._write_highwatermark_sync(task_list_id, highest)
+            return records
 
     # ----- update -------------------------------------------------------
 
