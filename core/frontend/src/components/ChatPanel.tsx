@@ -91,6 +91,10 @@ interface ChatPanelProps {
   activeThread: string;
   /** When true, the input is disabled (e.g. during loading) */
   disabled?: boolean;
+  /** When true, only the send button is locked — the textarea stays typable.
+   *  Used during new-session bootstrap so the user can compose a follow-up
+   *  while the queen finishes warming up / streaming her first reply. */
+  sendLocked?: boolean;
   /** When false, the image attach button is hidden (model lacks vision support) */
   supportsImages?: boolean;
   /** Called when user clicks the stop button to cancel the queen's current turn */
@@ -916,6 +920,7 @@ export default function ChatPanel({
   isBusy,
   activeThread,
   disabled,
+  sendLocked,
   onCancel,
   onSteer,
   onCancelQueued,
@@ -1401,8 +1406,10 @@ export default function ChatPanel({
           );
         })}
 
-        {/* Show typing indicator while waiting for first queen response (disabled + empty chat) */}
-        {(isWaiting || (disabled && threadMessages.length === 0)) && (
+        {/* Show typing indicator while waiting for first queen response
+            (disabled / sendLocked + empty chat counts as warm-up). */}
+        {(isWaiting ||
+          ((disabled || sendLocked) && threadMessages.length === 0)) && (
           <div className="flex gap-3">
             <div
               className="flex-shrink-0 w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden"
@@ -1669,9 +1676,11 @@ export default function ChatPanel({
               placeholder={
                 disabled
                   ? "Connecting to agent..."
-                  : isBusy
-                    ? "Queue a message — or click Steer to inject now..."
-                    : "Message Queen Bee..."
+                  : sendLocked
+                    ? "Type ahead — send unlocks once the queen is ready..."
+                    : isBusy
+                      ? "Queue a message — or click Steer to inject now..."
+                      : "Message Queen Bee..."
               }
               disabled={disabled}
               className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed resize-none overflow-y-auto"
@@ -1689,12 +1698,16 @@ export default function ChatPanel({
             <button
               type="submit"
               disabled={
-                (!input.trim() && pendingImages.length === 0) || disabled
+                (!input.trim() && pendingImages.length === 0) ||
+                disabled ||
+                sendLocked
               }
               title={
-                isBusy
-                  ? "Queue message — sent after the current turn, or click Steer on the bubble to send now"
-                  : "Send"
+                sendLocked
+                  ? "Hold tight — the queen is starting up. Send unlocks once she's ready."
+                  : isBusy
+                    ? "Queue message — sent after the current turn, or click Steer on the bubble to send now"
+                    : "Send"
               }
               className={`p-2 rounded-lg disabled:opacity-30 hover:opacity-90 transition-opacity ${
                 isBusy

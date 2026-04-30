@@ -3,6 +3,7 @@ import AppLayout from "./layouts/AppLayout";
 import Home from "./pages/home";
 import ColonyChat from "./pages/colony-chat";
 import QueenDM from "./pages/queen-dm";
+import QueenRouting from "./pages/queen-routing";
 import OrgChart from "./pages/org-chart";
 import PromptLibrary from "./pages/prompt-library";
 import SkillsLibrary from "./pages/skills-library";
@@ -16,6 +17,7 @@ function App() {
       <Route element={<AppLayout />}>
         <Route path="/" element={<Home />} />
         <Route path="/colony/:colonyId" element={<ColonyChat />} />
+        <Route path="/queen-routing" element={<QueenRouting />} />
         <Route path="/queen/:queenId" element={<QueenDM />} />
         <Route path="/org-chart" element={<OrgChart />} />
         <Route path="/skills-library" element={<SkillsLibrary />} />

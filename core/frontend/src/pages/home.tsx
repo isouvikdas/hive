@@ -1,8 +1,8 @@
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, Send } from "lucide-react";
-import { messagesApi } from "@/api/messages";
+import { Send } from "lucide-react";
 import { useColony } from "@/context/ColonyContext";
+import { PENDING_CLASSIFY_KEY } from "./queen-routing";
 
 const promptHints = [
   "Check my inbox for urgent emails",
@@ -13,32 +13,25 @@ const promptHints = [
 
 export default function Home() {
   const navigate = useNavigate();
-  const { userProfile, refresh } = useColony();
+  const { userProfile } = useColony();
   const [inputValue, setInputValue] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [activePrompt, setActivePrompt] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const displayName = userProfile.displayName || "there";
 
-  const startQueenSession = async (text: string) => {
+  // Stash the prompt and bounce to /queen-routing immediately. The classify
+  // LLM call (2-5s) runs on the routing screen rather than blocking nav, so
+  // the user never watches a spinner on the home page.
+  const startQueenSession = (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || submitting) return;
-    setSubmitting(true);
-    setActivePrompt(trimmed);
+    if (!trimmed) return;
     try {
-      const { queen_id } = await messagesApi.classify(trimmed);
-      // Hand the first message to queen-dm via sessionStorage so it
-      // survives the navigation without leaking into the URL/history.
-      sessionStorage.setItem(`queenFirstMessage:${queen_id}`, trimmed);
-      refresh();
-      navigate(`/queen/${queen_id}?new=1`);
+      sessionStorage.setItem(PENDING_CLASSIFY_KEY, trimmed);
     } catch {
-      // Keep the user on home if bootstrap fails.
-    } finally {
-      setSubmitting(false);
-      setActivePrompt(null);
+      // sessionStorage disabled — fall through; the routing page will
+      // redirect back to home when the key is missing.
     }
+    navigate("/queen-routing");
   };
 
   const handlePromptHint = (text: string) => {
@@ -97,14 +90,10 @@ export default function Home() {
             <div className="absolute right-3 bottom-2.5">
               <button
                 type="submit"
-                disabled={!inputValue.trim() || submitting}
+                disabled={!inputValue.trim()}
                 className="w-8 h-8 rounded-lg bg-primary/90 hover:bg-primary text-primary-foreground flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
-                {submitting && !activePrompt ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Send className="w-3.5 h-3.5" />
-                )}
+                <Send className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -116,25 +105,12 @@ export default function Home() {
             <button
               key={hint}
               onClick={() => handlePromptHint(hint)}
-              disabled={submitting}
-              className="text-xs text-muted-foreground hover:text-foreground border border-border/50 hover:border-primary/30 rounded-full px-3.5 py-1.5 transition-all hover:bg-primary/[0.03] disabled:opacity-60 disabled:cursor-not-allowed"
+              className="text-xs text-muted-foreground hover:text-foreground border border-border/50 hover:border-primary/30 rounded-full px-3.5 py-1.5 transition-all hover:bg-primary/[0.03]"
             >
               {hint}
             </button>
           ))}
         </div>
-        {submitting && activePrompt && (
-          <p className="mt-4 text-center text-xs">
-            <span className="queen-debate-line">
-              <span>The queens are debating who should take this on</span>
-              <span aria-hidden="true">
-                {[0, 1, 2].map((dot) => (
-                  <span key={dot}>.</span>
-                ))}
-              </span>
-            </span>
-          </p>
-        )}
       </div>
     </div>
   );

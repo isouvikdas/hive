@@ -326,6 +326,11 @@ export default function ColonyChat() {
   // client_input_requested so we don't flicker the typing bubble off while
   // the queen is about to resume on the flushed input.
   const queenAboutToResumeRef = useRef(false);
+  // Question bubble for an ask_user that's actively awaiting an answer.
+  // Stashed instead of pushed into messages so the user only sees ONE copy
+  // of the question (the popup widget) while answering. Committed to the
+  // transcript on client_input_received so it lands above the user's reply.
+  const pendingAskUserBubbleRef = useRef<ChatMessage | null>(null);
   const suppressIntroRef = useRef(false);
   const loadingRef = useRef(false);
 
@@ -710,8 +715,34 @@ export default function ColonyChat() {
         case "client_input_received":
         case "client_input_requested":
         case "llm_text_delta": {
+          // Defer the queen's ask_user bubble so it doesn't render alongside
+          // the popup widget. Stash on request, commit on receive — see
+          // pendingAskUserBubbleRef declaration above for rationale.
+          let stashedAskUserBubble: ChatMessage | null = null;
+          if (
+            event.type === "client_input_requested" &&
+            isQueen &&
+            emittedMessages.length > 0
+          ) {
+            const rawQuestions = event.data?.questions;
+            if (Array.isArray(rawQuestions) && rawQuestions.length > 0) {
+              stashedAskUserBubble = emittedMessages[0];
+              pendingAskUserBubbleRef.current = stashedAskUserBubble;
+            }
+          }
+          if (
+            event.type === "client_input_received" &&
+            pendingAskUserBubbleRef.current &&
+            !suppressQueenMessages
+          ) {
+            // Commit the stashed bubble first; createdAt predates this
+            // event so timestamp-ordered insert places it above the answer.
+            upsertMessage(pendingAskUserBubbleRef.current);
+            pendingAskUserBubbleRef.current = null;
+          }
           if (!suppressQueenMessages) {
             for (const msg of emittedMessages) {
+              if (msg === stashedAskUserBubble) continue;
               if (isQueen) {
                 msg.phase = queenPhaseRef.current as ChatMessage["phase"];
               }

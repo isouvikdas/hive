@@ -140,9 +140,47 @@ export function sseEventToChatMessage(
       };
     }
 
-    case "client_input_requested":
-      // Handled explicitly in handleSSEEvent (workspace.tsx) for queen input widgets.
-      return null;
+    case "client_input_requested": {
+      // Surface the question(s) as a queen bubble in the chat history so the
+      // transcript records what was asked alongside the user's answer. The
+      // input widget at the bottom of the panel still drives the actual
+      // answer flow — this bubble is read-only context.
+      const rawQuestions = event.data?.questions;
+      if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
+      const prompts: string[] = [];
+      for (const q of rawQuestions) {
+        if (!q || typeof q !== "object") continue;
+        const qo = q as Record<string, unknown>;
+        const prompt =
+          typeof qo.prompt === "string"
+            ? qo.prompt
+            : typeof qo.question === "string"
+              ? (qo.question as string)
+              : null;
+        if (prompt) prompts.push(prompt);
+      }
+      if (prompts.length === 0) return null;
+      const content =
+        prompts.length === 1
+          ? prompts[0]
+          : prompts.map((p, i) => `${i + 1}. ${p}`).join("\n");
+      return {
+        // Stable per-request id so live + replay paths upsert the same row.
+        id: `ask-user-${event.execution_id ?? ""}-${event.timestamp ?? createdAt}`,
+        agent: agentDisplayName || event.node_id || "Agent",
+        agentColor: "",
+        content,
+        timestamp: "",
+        // Default to worker; the replayEvent wrapper upgrades to "queen"
+        // when stream_id === "queen". Mirrors llm_text_delta's pattern.
+        role: "worker",
+        thread,
+        createdAt,
+        nodeId: event.node_id || undefined,
+        executionId: event.execution_id || undefined,
+        streamId: event.stream_id || undefined,
+      };
+    }
 
     case "client_input_received": {
       const userContent = (event.data?.content as string) || "";

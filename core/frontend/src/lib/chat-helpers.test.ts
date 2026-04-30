@@ -309,12 +309,44 @@ describe("sseEventToChatMessage", () => {
     expect(result!.id).toMatch(/^stream-t-\d+-chat$/);
   });
 
-  it("returns null for client_input_requested (handled in workspace.tsx)", () => {
+  it("converts single client_input_requested question to a queen-style bubble", () => {
     const event = makeEvent({
       type: "client_input_requested",
-      node_id: "chat",
+      node_id: "queen",
       execution_id: "abc",
-      data: { prompt: "What next?" },
+      data: {
+        questions: [{ id: "q0", prompt: "Which folder?" }],
+      },
+    });
+    const result = sseEventToChatMessage(event, "t");
+    expect(result).not.toBeNull();
+    expect(result!.content).toBe("Which folder?");
+    expect(result!.id).toMatch(/^ask-user-abc-/);
+  });
+
+  it("converts multi-question client_input_requested to a numbered list", () => {
+    const event = makeEvent({
+      type: "client_input_requested",
+      node_id: "queen",
+      execution_id: "abc",
+      data: {
+        questions: [
+          { id: "q0", prompt: "Which folder?" },
+          { id: "q1", prompt: "Which date range?" },
+        ],
+      },
+    });
+    const result = sseEventToChatMessage(event, "t");
+    expect(result).not.toBeNull();
+    expect(result!.content).toBe("1. Which folder?\n2. Which date range?");
+  });
+
+  it("returns null for client_input_requested with no questions (auto-wait park)", () => {
+    const event = makeEvent({
+      type: "client_input_requested",
+      node_id: "queen",
+      execution_id: "abc",
+      data: {},
     });
     expect(sseEventToChatMessage(event, "t")).toBeNull();
   });

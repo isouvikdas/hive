@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { Loader2, Minus, Plus } from "lucide-react";
+import { Minus, Plus } from "lucide-react";
 import ChatPanel, {
   type ChatMessage,
   type ImageContent,
@@ -117,6 +117,12 @@ export default function QueenDM() {
   // client_input_requested so we don't flicker the typing bubble off while
   // the queen is about to resume on the flushed input.
   const queenAboutToResumeRef = useRef(false);
+  // Question bubble for an ask_user that's actively awaiting an answer. We
+  // stash it here instead of pushing it into messages so the user only sees
+  // ONE copy of the question (the popup widget) while answering. Committed
+  // to the transcript on client_input_received so the bubble lands right
+  // above the user's answer for scroll-back context.
+  const pendingAskUserBubbleRef = useRef<ChatMessage | null>(null);
   const [queenPhase, setQueenPhase] = useState<
     "independent" | "incubating" | "working" | "reviewing"
   >("independent");
@@ -541,19 +547,11 @@ export default function QueenDM() {
 
   const handleCreateNewSession = useCallback(() => {
     if (!queenId) return;
-    setCreatingNewSession(true);
-    const request = queensApi.createNewSession(
-      queenId,
-      undefined,
-      "independent",
-    );
-    request
-      .then((result) => {
-        setSearchParams({ session: result.session_id });
-      })
-      .catch(() => {
-        setCreatingNewSession(false);
-      });
+    // Bounce through the ?new=1 bootstrap path so the chat shell appears
+    // immediately with a typing indicator while createNewSession runs in
+    // the background. URL is replaced with ?session=<id> when it resolves.
+    // Avoids the 5s "nothing happens, then chat appears" dead window.
+    setSearchParams({ new: "1" });
   }, [queenId, setSearchParams]);
 
   useEffect(() => {
@@ -662,6 +660,14 @@ export default function QueenDM() {
             queenAboutToResumeRef.current = false;
             break;
           }
+          // Stash the question bubble (synthesized by replayEvent) instead
+          // of upserting now: while the popup widget is open the user only
+          // wants to see ONE copy of the question. We commit the bubble on
+          // client_input_received so it lands right above the user's
+          // answer in the transcript.
+          if (emittedMessages.length > 0) {
+            pendingAskUserBubbleRef.current = emittedMessages[0];
+          }
           setAwaitingInput(true);
           setIsTyping(false);
           setIsStreaming(false);
@@ -670,6 +676,14 @@ export default function QueenDM() {
         }
 
         case "client_input_received": {
+          // Commit the stashed ask_user bubble first so it appears above
+          // the user's reply in scroll-back. Its createdAt predates this
+          // event's, so the timestamp-ordered insert in upsertMessage
+          // places it correctly.
+          if (pendingAskUserBubbleRef.current) {
+            upsertMessage(pendingAskUserBubbleRef.current);
+            pendingAskUserBubbleRef.current = null;
+          }
           for (const msg of emittedMessages) {
             upsertMessage(msg, { reconcileOptimisticUser: true });
           }
@@ -918,19 +932,6 @@ export default function QueenDM() {
     <div className="flex flex-col h-full">
       {/* Chat */}
       <div className="flex-1 min-h-0 relative">
-        {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/60 backdrop-blur-sm">
-            <div className="flex items-center gap-3 text-muted-foreground">
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span className="text-sm">
-                {selectedSessionParam?.startsWith("session_")
-                  ? "Connecting to session..."
-                  : `Connecting to ${queenName}...`}
-              </span>
-            </div>
-          </div>
-        )}
-
         <ChatPanel
           messages={messages}
           onSend={handleSend}
@@ -940,7 +941,10 @@ export default function QueenDM() {
           activeThread="queen-dm"
           isWaiting={isTyping && !isStreaming}
           isBusy={isTyping}
-          disabled={loading || !queenReady}
+          // Keep the textarea typable while the queen is warming up so the
+          // user can compose a follow-up immediately. Send stays locked
+          // until the session is live and the queen is ready.
+          sendLocked={loading || !queenReady}
           queenPhase={queenPhase}
           showQueenPhaseBadge
           pendingQuestions={awaitingInput ? pendingQuestions : null}
