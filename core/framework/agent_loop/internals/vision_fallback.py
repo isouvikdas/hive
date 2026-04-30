@@ -210,7 +210,7 @@ async def caption_tool_image(
     kwargs: dict[str, Any] = {
         "model": rewritten_model,
         "messages": messages,
-        "max_tokens": 1024,
+        "max_tokens": 8192,
         "timeout": timeout_s,
     }
     # Pass api_key directly only when there are no proxy-rewritten
