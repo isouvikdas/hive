@@ -18,9 +18,10 @@ This module provides:
 
 Both helpers degrade silently — return ``None`` / a placeholder rather
 than raise — so a vision-fallback failure can never kill the main
-agent's run. The agent-loop call site is responsible for chaining
-through to the existing generic-caption rotation
-(``_describe_images_as_text``) on a None return.
+agent's run. The agent-loop call site retries the configured model
+once on a None return, then falls back to
+``gemini/gemini-3-flash-preview`` via the ``model_override`` parameter
+of :func:`caption_tool_image`.
 """
 
 from __future__ import annotations
@@ -156,25 +157,30 @@ async def caption_tool_image(
     image_content: list[dict[str, Any]],
     *,
     timeout_s: float = 30.0,
+    model_override: str | None = None,
 ) -> tuple[str, str] | None:
     """Caption the given images using the configured ``vision_fallback`` model.
 
-    Returns ``(caption, model)`` on success — the model's text response
-    paired with the model id that produced it — or ``None`` on any
-    failure (no config, no API key, timeout, exception, empty
-    response). Callers chain to the next stage of the fallback on None.
+    Returns ``(caption, model)`` on success or ``None`` on any failure
+    (no config, no API key, timeout, exception, empty response).
 
-    Logs each call to ``~/.hive/llm_logs`` via ``log_llm_turn`` so the
-    cost / latency / quality are auditable post-hoc, tagged with
-    ``execution_id="vision_fallback_subagent"``.
+    ``model_override`` swaps in a different litellm model id while
+    keeping the configured ``vision_fallback`` ``api_key`` / ``api_base``
+    untouched. That's deliberate: Hive subscribers configure
+    ``vision_fallback`` to point at the Hive proxy, which routes to
+    multiple models including Gemini — so reusing the credentials lets
+    a Gemini-3-flash override still work without a separate
+    ``GEMINI_API_KEY``. When no creds are configured, litellm falls
+    back to env-var resolution.
+
+    Logs each call to ``~/.hive/llm_logs`` via ``log_llm_turn``.
     """
-    model = get_vision_fallback_model()
+    model = model_override or get_vision_fallback_model()
     if not model:
         return None
-
     api_key = get_vision_fallback_api_key()
     api_base = get_vision_fallback_api_base()
-    if not api_key:
+    if not api_key and not model_override:
         logger.debug("vision_fallback configured but no API key resolved; skipping")
         return None
 
@@ -195,8 +201,9 @@ async def caption_tool_image(
         "messages": messages,
         "max_tokens": 1024,
         "timeout": timeout_s,
-        "api_key": api_key,
     }
+    if api_key:
+        kwargs["api_key"] = api_key
     if api_base:
         kwargs["api_base"] = api_base
 

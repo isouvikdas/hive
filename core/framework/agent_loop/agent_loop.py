@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -183,50 +182,20 @@ def _strip_internal_tags_from_snapshot(snapshot: str) -> str:
 
 
 async def _describe_images_as_text(image_content: list[dict[str, Any]]) -> tuple[str, str] | None:
-    """Describe images using the best available vision model.
+    """Describe images for the injection-queue drain (no preceding tool call).
 
-    Returns ``(description, model)`` on success — the formatted
-    placeholder text plus the model id that produced it — or ``None``
-    when every candidate fails or no API key is configured.
+    Wraps :func:`_captioning_chain` with a generic intent and returns
+    the caption inside an ``[image attached — description: …]`` envelope
+    so the injected text reads as image content rather than free-form
+    prose.
     """
-    import litellm
-
-    blocks: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                "Describe the following image(s) concisely but with enough detail "
-                "that a text-only AI assistant can understand the content and context."
-            ),
-        }
-    ]
-    blocks.extend(image_content)
-
-    candidates: list[str] = []
-    if os.environ.get("OPENAI_API_KEY"):
-        candidates.append("gpt-4o-mini")
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        candidates.append("claude-3-haiku-20240307")
-    if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-        candidates.append("gemini/gemini-1.5-flash")
-
-    for model in candidates:
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=[{"role": "user", "content": blocks}],
-                max_tokens=512,
-            )
-            description = (response.choices[0].message.content or "").strip()
-            if description:
-                count = len(image_content)
-                label = "image" if count == 1 else f"{count} images"
-                return f"[{label} attached  — description: {description}]", model
-        except Exception as exc:
-            logger.debug("Vision fallback model '%s' failed: %s", model, exc)
-            continue
-
-    return None
+    intent = "Describe the attached image(s) so a text-only agent can understand them."
+    result = await _captioning_chain(intent, image_content)
+    if not result:
+        return None
+    description, model = result
+    label = "image" if len(image_content) == 1 else f"{len(image_content)} images"
+    return f"[{label} attached  — description: {description}]", model
 
 
 def _vision_fallback_active(model: str | None) -> bool:
@@ -253,21 +222,22 @@ async def _captioning_chain(
     intent: str,
     image_content: list[dict[str, Any]],
 ) -> tuple[str, str] | None:
-    """Two-stage caption chain used by the agent-loop tool-result hook.
+    """Configured vision_fallback → retry → ``gemini/gemini-3-flash-preview``.
 
-    Stage 1: configured ``vision_fallback`` model with intent + images.
-    Stage 2: generic-caption rotation (gpt-4o-mini → claude-3-haiku
-    → gemini-flash) when stage 1 is unconfigured or fails.
-
-    Returns ``(caption, model)`` — the caption text paired with the
-    model id that produced it — or ``None`` if both stages fail.
-    Caller is responsible for the placeholder-on-None and the splice
-    into the persisted tool-result content.
+    The Gemini override reuses the configured ``api_key`` / ``api_base``,
+    so a Hive subscriber (whose token routes to a multi-model proxy)
+    keeps coverage when their primary model glitches. Without
+    configured creds litellm falls through to env-based Gemini auth;
+    users with neither Hive nor a ``GEMINI_API_KEY`` simply lose the
+    third try.
     """
-    result = await caption_tool_image(intent, image_content)
-    if not result:
-        result = await _describe_images_as_text(image_content)
-    return result
+    if result := await caption_tool_image(intent, image_content):
+        return result
+    logger.warning("vision_fallback failed; retrying configured model")
+    if result := await caption_tool_image(intent, image_content):
+        return result
+    logger.warning("vision_fallback retry failed; trying gemini-3-flash-preview")
+    return await caption_tool_image(intent, image_content, model_override="gemini/gemini-3-flash-preview")
 
 
 # Pattern for detecting context-window-exceeded errors across LLM providers.

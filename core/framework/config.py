@@ -162,9 +162,10 @@ def get_vision_fallback_model() -> str | None:
     Used by the agent-loop hook that captions tool-result images when the
     main agent's model cannot accept image content (text-only LLMs).
 
-    When this returns None the fallback chain skips the configured-subagent
-    stage and proceeds straight to the generic caption rotation
-    (``_describe_images_as_text``).
+    When this returns None the captioning chain's configured + retry
+    attempts both no-op (returning None), and only the final
+    ``gemini/gemini-3-flash-preview`` override has a chance to succeed
+    — and only if a ``GEMINI_API_KEY`` is set in the environment.
     """
     vision = get_hive_config().get("vision_fallback", {})
     if vision.get("provider") and vision.get("model"):
