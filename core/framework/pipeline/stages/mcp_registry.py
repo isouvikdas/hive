@@ -45,6 +45,18 @@ class McpRegistryStage(PipelineStage):
         from framework.orchestrator.files import FILES_MCP_SERVER_NAME
 
         registry = MCPRegistry()
+        # Seed the bundled default servers (hive_tools, gcu-tools, files-tools,
+        # shell-tools) into the active HIVE_HOME's installed.json on first
+        # encounter. Idempotent — already-installed entries are left alone.
+        # Without this, a fresh HIVE_HOME (e.g. the desktop app's per-user
+        # dir under ~/.config/Hive/users/<hash>) only gets defaults via the
+        # `hive mcp` CLI, never via the runtime that consumes them.
+        try:
+            seeded = registry.ensure_defaults()
+            if seeded:
+                logger.info("[pipeline] McpRegistryStage: seeded defaults: %s", seeded)
+        except Exception as exc:
+            logger.warning("[pipeline] McpRegistryStage: ensure_defaults failed: %s", exc)
         mcp_loaded = False
 
         # 1. From agent.json mcp_servers refs
