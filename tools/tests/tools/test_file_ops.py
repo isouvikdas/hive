@@ -1,11 +1,9 @@
 """Tests for aden_tools.file_ops — the unified file-tool surface.
 
 Covers the path policy (home anchoring, deny lists, write_safe_root),
-plus the six file tools: read_file, write_file, edit_file, hashline_edit,
-search_files, apply_patch.
+plus the four file tools: read_file, write_file, search_files, patch.
 """
 
-import json
 import os
 from unittest.mock import patch
 
@@ -261,70 +259,172 @@ class TestPathPolicyWriteSafeRoot:
         assert "Error" in result
 
 
-class TestApplyPatchTool:
-    """apply_patch — diff_match_patch text → file."""
+class TestPatchToolReplaceMode:
+    """patch(mode='replace') — single-file fuzzy find/replace."""
 
-    def test_apply_patch_modifies_file(self, file_ops_mcp, tmp_path):
-        """A valid patch applies and rewrites the file."""
-        import diff_match_patch as dmp_module
-
-        target = tmp_path / "patch_me.txt"
+    def test_replace_basic(self, file_ops_mcp, tmp_path):
+        """Exact match path: simple substitution."""
+        target = tmp_path / "a.txt"
         target.write_text("Hello World", encoding="utf-8")
-
-        dmp = dmp_module.diff_match_patch()
-        patches = dmp.patch_make("Hello World", "Hello Universe")
-        patch_text = dmp.patch_toText(patches)
-
-        apply_fn = _get_tool_fn(file_ops_mcp, "apply_patch")
-        result = apply_fn(path="patch_me.txt", patch_text=patch_text)
-
-        assert "Error" not in result
-        assert "Applied" in result
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="replace", path="a.txt", old_string="World", new_string="Universe")
+        assert "Replaced 1" in result
         assert target.read_text() == "Hello Universe"
 
-    def test_apply_patch_missing_file(self, file_ops_mcp):
-        """Patching a non-existent file returns an error string."""
-        apply_fn = _get_tool_fn(file_ops_mcp, "apply_patch")
-        result = apply_fn(path="nope.txt", patch_text="garbage")
+    def test_replace_unicode_normalized(self, file_ops_mcp, tmp_path):
+        """Smart quotes in old_string match plain quotes on disk."""
+        target = tmp_path / "b.py"
+        target.write_text('print("hi")\n', encoding="utf-8")
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        # old_string uses smart quotes; file has straight quotes
+        result = edit_fn(
+            mode="replace",
+            path="b.py",
+            old_string='print(“hi”)',
+            new_string='print("HELLO")',
+        )
+        assert "Error" not in result
+        assert target.read_text() == 'print("HELLO")\n'
+
+    def test_replace_escape_normalized(self, file_ops_mcp, tmp_path):
+        """Literal '\\n' in old_string matches actual newline on disk."""
+        target = tmp_path / "c.txt"
+        target.write_text("alpha\nbeta\n", encoding="utf-8")
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(
+            mode="replace",
+            path="c.txt",
+            old_string="alpha\\nbeta",
+            new_string="X",
+        )
+        assert "Error" not in result
+        assert target.read_text() == "X\n"
+
+    def test_replace_missing_file(self, file_ops_mcp):
+        """Replacing in a non-existent file returns an error."""
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="replace", path="nope.txt", old_string="x", new_string="y")
         assert "Error" in result
         assert "not found" in result.lower()
 
-    def test_apply_patch_garbage_text(self, file_ops_mcp, tmp_path):
-        """Patch text that produces no patches is rejected without writing."""
-        target = tmp_path / "f.txt"
-        target.write_text("original", encoding="utf-8")
-        apply_fn = _get_tool_fn(file_ops_mcp, "apply_patch")
-        result = apply_fn(path="f.txt", patch_text="not a patch")
+    def test_replace_no_match(self, file_ops_mcp, tmp_path):
+        """Failure path includes a hint pointing at read_file/search_files."""
+        target = tmp_path / "d.txt"
+        target.write_text("alpha\n", encoding="utf-8")
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="replace", path="d.txt", old_string="zzz", new_string="y")
         assert "Error" in result
-        assert target.read_text() == "original"
+        assert "read_file" in result or "search_files" in result
 
-    def test_apply_patch_write_denied_for_system_path(self, file_ops_mcp):
-        """The deny list applies to apply_patch just like write_file."""
-        apply_fn = _get_tool_fn(file_ops_mcp, "apply_patch")
-        result = apply_fn(path="/etc/passwd", patch_text="x")
+    def test_replace_denied_for_system_path(self, file_ops_mcp):
+        """The deny list applies to replace mode."""
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="replace", path="/etc/passwd", old_string="a", new_string="b")
         assert "Error" in result
         assert "denied" in result.lower()
 
 
-class TestHashlineEditViaPolicy:
-    """hashline_edit honors the same path policy as the rest."""
+class TestPatchToolPatchMode:
+    """patch(mode='patch') — multi-file structured patch."""
 
-    def test_hashline_edit_relative_path(self, file_ops_mcp, tmp_path):
-        """hashline_edit on a relative path lands in home."""
-        from aden_tools.hashline import compute_line_hash
+    def test_patch_update_single_file(self, file_ops_mcp, tmp_path):
+        """A V4A Update hunk replaces matched lines and writes."""
+        target = tmp_path / "u.py"
+        target.write_text("def f():\n    return 1\n", encoding="utf-8")
+        body = (
+            "*** Begin Patch\n"
+            "*** Update File: u.py\n"
+            " def f():\n"
+            "-    return 1\n"
+            "+    return 42\n"
+            "*** End Patch\n"
+        )
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
+        assert "Error" not in result
+        assert "Modified" in result
+        assert target.read_text() == "def f():\n    return 42\n"
 
-        target = tmp_path / "hl.txt"
-        target.write_text("aaa\nbbb\nccc\n", encoding="utf-8")
+    def test_patch_add_file(self, file_ops_mcp, tmp_path):
+        """Add File: creates a new file from + lines."""
+        body = (
+            "*** Begin Patch\n"
+            "*** Add File: new.py\n"
+            "+# new\n"
+            "+x = 1\n"
+            "*** End Patch\n"
+        )
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
+        assert "Error" not in result
+        assert "Created" in result
+        created = tmp_path / "new.py"
+        assert created.exists()
+        assert created.read_text() == "# new\nx = 1\n"
 
-        edits = json.dumps([{"op": "set_line", "anchor": f"2:{compute_line_hash('bbb')}", "content": "BBB"}])
-        hashline_fn = _get_tool_fn(file_ops_mcp, "hashline_edit")
-        result = hashline_fn(path="hl.txt", edits=edits)
-        assert "Applied" in result
-        assert target.read_text() == "aaa\nBBB\nccc\n"
+    def test_patch_delete_file(self, file_ops_mcp, tmp_path):
+        """Delete File: removes the file."""
+        target = tmp_path / "doomed.py"
+        target.write_text("bye\n", encoding="utf-8")
+        body = "*** Begin Patch\n*** Delete File: doomed.py\n*** End Patch\n"
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
+        assert "Error" not in result
+        assert "Deleted" in result
+        assert not target.exists()
 
-    def test_hashline_edit_denied_for_system_path(self, file_ops_mcp):
-        """The deny list also covers hashline_edit."""
-        hashline_fn = _get_tool_fn(file_ops_mcp, "hashline_edit")
-        result = hashline_fn(path="/etc/passwd", edits="[]")
-        # Either deny-list error or empty-edits error — both before the write.
+    def test_patch_move_file(self, file_ops_mcp, tmp_path):
+        """Move File: renames source to destination."""
+        src = tmp_path / "src.py"
+        src.write_text("kept\n", encoding="utf-8")
+        body = "*** Begin Patch\n*** Move File: src.py -> dst.py\n*** End Patch\n"
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
+        assert "Error" not in result
+        dst = tmp_path / "dst.py"
+        assert not src.exists()
+        assert dst.exists()
+        assert dst.read_text() == "kept\n"
+
+    def test_patch_atomic_failure(self, file_ops_mcp, tmp_path):
+        """One failing op aborts the whole batch with no writes."""
+        target = tmp_path / "real.py"
+        target.write_text("original\n", encoding="utf-8")
+        body = (
+            "*** Begin Patch\n"
+            "*** Update File: real.py\n"
+            "-original\n"
+            "+changed\n"
+            "*** Update File: missing.py\n"
+            "-foo\n"
+            "+bar\n"
+            "*** End Patch\n"
+        )
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
         assert "Error" in result
+        # First file must be untouched — atomic semantics.
+        assert target.read_text() == "original\n"
+
+    def test_patch_lenient_missing_markers(self, file_ops_mcp, tmp_path):
+        """Begin/End markers are optional."""
+        target = tmp_path / "loose.py"
+        target.write_text("a\nb\nc\n", encoding="utf-8")
+        body = "*** Update File: loose.py\n-b\n+B\n"
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text=body)
+        assert "Error" not in result
+        assert target.read_text() == "a\nB\nc\n"
+
+    def test_patch_empty_body_rejected(self, file_ops_mcp):
+        """Empty patch_text returns an error before any work."""
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="patch", patch_text="")
+        assert "Error" in result
+
+    def test_patch_unknown_mode(self, file_ops_mcp):
+        """A typo in mode is surfaced as an error string."""
+        edit_fn = _get_tool_fn(file_ops_mcp, "edit_file")
+        result = edit_fn(mode="bogus")
+        assert "Error" in result
+        assert "unknown mode" in result.lower()

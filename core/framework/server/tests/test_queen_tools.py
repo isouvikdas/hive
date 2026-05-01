@@ -187,13 +187,16 @@ async def test_get_tools_applies_role_default(queen_dir, monkeypatch):
     _, queen_id = queen_dir  # queen_technology — has a role default
 
     manager = _FakeManager()
-    # Seed a catalog covering tools the role default references so the
-    # response reflects what the queen would actually see on boot.
+    # Seed two MCP servers: files-tools is referenced by the technology
+    # role via the @server:files-tools shorthand in `file_ops`, so its
+    # tools should bubble into the default. unrelated-server is NOT
+    # referenced by any role category — its tools must NOT leak in.
     manager._mcp_tool_catalog = {
         "files-tools": [
             {"name": "read_file", "description": "", "input_schema": {}},
-            {"name": "port_scan", "description": "", "input_schema": {}},  # security
-            {"name": "excel_read", "description": "", "input_schema": {}},  # data
+            {"name": "edit_file", "description": "", "input_schema": {}},
+        ],
+        "unrelated-server": [
             {"name": "fluffy_unknown_tool", "description": "", "input_schema": {}},
         ],
     }
@@ -204,14 +207,13 @@ async def test_get_tools_applies_role_default(queen_dir, monkeypatch):
         assert resp.status == 200
         body = await resp.json()
 
-    # queen_technology's role default includes file_read, data, security, etc.
     assert body["is_role_default"] is True
     enabled = set(body["enabled_mcp_tools"] or [])
+    # @server:files-tools shorthand pulls in every tool under that server.
     assert "read_file" in enabled
-    assert "port_scan" in enabled  # technology role includes security
-    assert "excel_read" in enabled
-    # Tools not in any category (and not in a @server: expansion target
-    # the role references) are NOT part of the default.
+    assert "edit_file" in enabled
+    # Tools registered under a server the role doesn't reference are NOT
+    # part of the default.
     assert "fluffy_unknown_tool" not in enabled
 
 
@@ -220,16 +222,16 @@ def test_resolve_queen_default_tools_expands_server_shorthand():
     from framework.agents.queen.queen_tools_defaults import resolve_queen_default_tools
 
     catalog = {
-        "gcu-tools": [
-            {"name": "browser_navigate"},
-            {"name": "browser_click"},
+        "files-tools": [
+            {"name": "read_file"},
+            {"name": "write_file"},
         ],
     }
-    # queen_brand_design uses "browser" category → expands via @server:gcu-tools.
+    # queen_brand_design uses "file_ops" category → expands via @server:files-tools.
     result = resolve_queen_default_tools("queen_brand_design", catalog)
     assert result is not None
-    assert "browser_navigate" in result
-    assert "browser_click" in result
+    assert "read_file" in result
+    assert "write_file" in result
 
 
 def test_resolve_queen_default_tools_unknown_queen_returns_none():

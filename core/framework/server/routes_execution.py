@@ -44,7 +44,6 @@ _WORKER_INHERITED_TOOLS: frozenset[str] = frozenset(
         "edit_file",
         "hashline_edit",
         "search_files",
-        "undo_changes",
         # Shell
         "run_command",
         # Framework synthetics (always available to any AgentLoop node)

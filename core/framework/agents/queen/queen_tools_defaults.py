@@ -36,32 +36,20 @@ logger = logging.getLogger(__name__)
 # the named entries only).
 
 _TOOL_CATEGORIES: dict[str, list[str]] = {
-    # Read-only file operations — safe baseline for every knowledge queen.
-    # search_files is unified: covers content grep AND directory listing
-    # via target='content' / target='files'.
-    "file_read": [
-        "read_file",
-        "search_files",
-        "pdf_read",
+    # Unified file ops — read, write, edit, search across the post-refactor
+    # files-tools MCP server (read_file, write_file, edit_file, hashline_edit,
+    # apply_patch, search_files). 
+    "file_ops": [
+        "@server:files-tools",
     ],
-    # File mutation — only personas that author or edit artifacts.
-    "file_write": [
-        "write_file",
-        "edit_file",
-        "hashline_edit",
-    ],
-    # Shell + process control — engineering personas only.
-    # Includes the legacy coder-tools commands (run_command, bash_*) and
-    # the full terminal-tools MCP server (foreground exec with auto-promotion,
-    # background jobs, persistent PTY sessions, ripgrep/find).
-    "shell": [
-        "execute_command_tool",
-        "bash_kill",
-        "bash_output",
+    # Terminal + process control — engineering personas only.
+    # The terminal-tools MCP server covers foreground exec with auto-promotion,
+    # background jobs, persistent PTY sessions, and ripgrep/find search.
+    "terminal": [
         "@server:terminal-tools",
     ],
     # Tabular data. CSV/Excel read/write + DuckDB SQL.
-    "data": [
+    "advanced_spreadsheet": [
         "csv_read",
         "csv_info",
         "csv_write",
@@ -75,19 +63,60 @@ _TOOL_CATEGORIES: dict[str, list[str]] = {
         "excel_sheet_list",
         "excel_sql",
     ],
-    # Browser automation — every tool from the gcu-tools MCP server.
-    "browser": ["@server:gcu-tools"],
+    # Browser lifecycle + read-only inspection (navigation, snapshots, query).
+    # Split out from interaction so personas that only need to *observe* pages
+    # (e.g. research, status checks) don't pull in click/type/drag/etc.
+    "browser_basic": [
+        "browser_setup",
+        "browser_status",
+        "browser_start",
+        "browser_stop",
+        "browser_tabs",
+        "browser_open",
+        "browser_close",
+        "browser_activate_tab",
+        "browser_close_all",
+        "browser_close_finished",
+        "browser_navigate",
+        "browser_go_back",
+        "browser_go_forward",
+        "browser_reload",
+        "browser_screenshot",
+        "browser_snapshot",
+        "browser_html",
+        "browser_console",
+        "browser_evaluate",
+        "browser_get_text",
+        "browser_get_attribute",
+        "browser_get_rect",
+        "browser_shadow_query",
+    ],
+    # Browser interaction — anything that mutates page state (clicks, typing,
+    # drag, scrolling, dialogs, file uploads). Pair with browser_basic for
+    # full automation; omit for read-only personas.
+    "browser_interaction": [
+        "browser_click",
+        "browser_click_coordinate",
+        "browser_type",
+        "browser_fill",
+        "browser_type_focused",
+        "browser_press",
+        "browser_press_at",
+        "browser_hover",
+        "browser_hover_coordinate",
+        "browser_select",
+        "browser_scroll",
+        "browser_drag",
+        "browser_wait",
+        "browser_resize",
+        "browser_upload",
+        "browser_dialog",
+    ],
     # Lightweight context helpers — good default for every queen.
     "time_context": [
         "get_current_time",
         "get_account_info",
-    ],
-    # Agent-management tools — building/validating/checking agents.
-    "agent_mgmt": [
-        "save_agent_draft",
-        "confirm_and_build",
-        "enqueue_task",
-    ],
+    ]
 }
 
 
@@ -107,77 +136,71 @@ _TOOL_CATEGORIES: dict[str, list[str]] = {
 QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
     # Head of Technology — builds and operates systems; full toolkit.
     "queen_technology": [
-        "file_read",
-        "file_write",
-        "shell",
-        "data",
-        "browser",
+        "file_ops",
+        "terminal",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "security",
         "time_context",
-        "agent_mgmt",
     ],
-    # Head of Growth — data, experiments, competitor research; no shell/security.
+    # Head of Growth — data, experiments, competitor research; no terminal/security.
     "queen_growth": [
-        "file_read",
-        "file_write",
-        "data",
-        "browser",
+        "file_ops",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
-    # Head of Product Strategy — user research + roadmaps; no shell/security.
+    # Head of Product Strategy — user research + roadmaps; no terminal/security.
     "queen_product_strategy": [
-        "file_read",
-        "file_write",
-        "data",
-        "browser",
+        "file_ops",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
     # Head of Finance — financial models (CSV/Excel heavy), market research.
     "queen_finance_fundraising": [
-        "file_read",
-        "file_write",
-        "data",
-        "browser",
+        "file_ops",
+        "advanced_spreadsheet",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
-    # Head of Legal — reads contracts/PDFs, researches; no shell/data/security.
+    # Head of Legal — reads contracts/PDFs, researches; no terminal/data/security.
     "queen_legal": [
-        "file_read",
-        "file_write",
-        "browser",
+        "file_ops",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
-    # Head of Brand & Design — visual refs, style guides; no shell/data/security.
+    # Head of Brand & Design — visual refs, style guides; no terminal/data/security.
     "queen_brand_design": [
-        "file_read",
-        "file_write",
-        "browser",
+        "file_ops",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
     # Head of Talent — candidate pipelines, resumes; data + browser heavy.
     "queen_talent": [
-        "file_read",
-        "file_write",
-        "data",
-        "browser",
+        "file_ops",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
     ],
     # Head of Operations — processes, automation, observability.
     "queen_operations": [
-        "file_read",
-        "file_write",
+        "file_ops",
         "data",
-        "browser",
+        "browser_basic",
+        "browser_interaction",
         "research",
         "time_context",
-        "agent_mgmt",
     ],
 }
 
