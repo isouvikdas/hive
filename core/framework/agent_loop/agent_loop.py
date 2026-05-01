@@ -219,8 +219,20 @@ async def _captioning_chain(
     logger.warning("vision_fallback failed; retrying configured model")
     if result := await caption_tool_image(intent, image_content):
         return result
-    logger.warning("vision_fallback retry failed; trying gemini-3-flash-preview")
-    return await caption_tool_image(intent, image_content, model_override="gemini/gemini-3-flash-preview")
+    # Match the configured model's proxy prefix so the override is routed
+    # through the same endpoint with the same auth shape. Without this,
+    # a Hive subscriber's `hive/...` config would override to
+    # `gemini/...` — which sends Google's Gemini protocol to the
+    # Anthropic-compatible Hive proxy (404), not what we want.
+    configured = (get_vision_fallback_model() or "").lower()
+    if configured.startswith("hive/"):
+        override = "hive/gemini-3-flash-preview"
+    elif configured.startswith("kimi/"):
+        override = "kimi/gemini-3-flash-preview"
+    else:
+        override = "gemini/gemini-3-flash-preview"
+    logger.warning("vision_fallback retry failed; trying %s", override)
+    return await caption_tool_image(intent, image_content, model_override=override)
 
 
 # Pattern for detecting context-window-exceeded errors across LLM providers.

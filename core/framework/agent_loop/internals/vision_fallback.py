@@ -213,10 +213,12 @@ async def caption_tool_image(
         "max_tokens": 8192,
         "timeout": timeout_s,
     }
-    # Pass api_key directly only when there are no proxy-rewritten
-    # extra_headers carrying the auth (e.g. the gemini-3-flash override
-    # path goes direct to Gemini, not through the Hive proxy).
-    if api_key and not extra_headers:
+    # Always pass api_key when we have one, even alongside proxy-rewritten
+    # extra_headers. litellm's anthropic handler refuses to dispatch
+    # without an api_key (it sends it as x-api-key); the proxy itself
+    # authenticates via the Authorization: Bearer header in
+    # extra_headers. Both are needed — matches LiteLLMProvider's path.
+    if api_key:
         kwargs["api_key"] = api_key
     if rewritten_base:
         kwargs["api_base"] = rewritten_base
