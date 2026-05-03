@@ -359,6 +359,7 @@ async def create_queen(
         queen_goal,
         queen_loop_config as _base_loop_config,
     )
+    from framework.config import get_max_tokens as _get_max_tokens
     from framework.agents.queen.nodes import (
         _QUEEN_INCUBATING_TOOLS,
         _QUEEN_INDEPENDENT_TOOLS,
@@ -982,7 +983,12 @@ async def create_queen(
                 llm=session.llm,
                 available_tools=queen_tools,
                 goal_context=queen_goal.to_prompt_context(),
-                max_tokens=lc.get("max_tokens", 8192),
+                # Honor configuration.json (llm.max_tokens) instead of
+                # hard-defaulting to 8192. The legacy fallback ignored both
+                # the user's saved ceiling AND the model's actual output
+                # capacity (e.g. glm-5.1 / kimi-k2.5 both support 32k out),
+                # which silently truncated long tool-emitting turns.
+                max_tokens=lc.get("max_tokens", _get_max_tokens()),
                 stream_id="queen",
                 execution_id=session.id,
                 dynamic_tools_provider=phase_state.get_current_tools,

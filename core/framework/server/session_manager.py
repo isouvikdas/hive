@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from framework.config import QUEENS_DIR
+from framework.config import QUEENS_DIR, get_max_tokens
 from framework.host.triggers import TriggerDefinition
 
 logger = logging.getLogger(__name__)
@@ -700,7 +700,10 @@ class SessionManager:
             available_tools=all_tools,
             goal_context=goal.to_prompt_context(),
             goal=goal,
-            max_tokens=8192,
+            # Worker output cap — pull from configuration.json instead of
+            # hard-coding 8192. glm-5.1/kimi-k2.5 both support 32k out, and
+            # capping at 8k silently truncates long worker turns mid-tool.
+            max_tokens=get_max_tokens(),
             stream_id=worker_name,
             execution_id=worker_name,
             identity_prompt=worker_data.get("identity_prompt", ""),
