@@ -642,7 +642,7 @@ class CredentialStoreAdapter:
                 # Use 5-second timeout to avoid blocking on slow/failed requests
                 client = AdenCredentialClient(
                     AdenClientConfig(
-                        base_url=os.environ.get("ADEN_API_URL", "https://api.adenhq.com"),
+                        base_url=os.environ.get("ADEN_API_URL", "https://app.open-hive.com"),
                         timeout=5.0,
                     )
                 )

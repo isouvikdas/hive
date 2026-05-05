@@ -2328,7 +2328,7 @@ def register_queen_lifecycle_tools(
             "create_colony. Existing siblings are preserved. Pass only "
             "the fields you want to change."
         ),
-        input_schema={
+        parameters={
             "type": "object",
             "properties": {
                 "colony_name": {"type": "string"},
