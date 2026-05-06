@@ -320,6 +320,18 @@ the rest.
   overall purpose. Validated up front — a bad cron, missing task, or \
   malformed webhook path fails the call before anything is written, \
   so you can retry with corrected input.
+- ``worker_profiles`` (optional array) — pass this ONLY when the \
+  colony needs multiple authorized accounts of the same vendor (two \
+  Slack workspaces, two Gmail accounts) so each worker calls the \
+  right one. Each entry: ``{name, integrations: {provider: alias}, \
+  task?, skill_name?, concurrency_hint?, prompt_override?, \
+  tool_filter?}``. ``alias`` is the account label the user assigned \
+  on hive.adenhq.com (e.g. ``work``, ``personal``); discover \
+  available aliases via ``get_account_info()``. If omitted, the \
+  colony has a single implicit ``default`` profile that uses each \
+  provider's primary account — that's the right call for almost \
+  every colony. Use ``update_worker_profile`` to swap a profile's \
+  alias later without rebuilding the colony.
 - After this returns, the chat is over: the session locks immediately \
   and the user gets a "compact and start a new session with you" \
   button. So make your call to create_colony the last thing you do — \

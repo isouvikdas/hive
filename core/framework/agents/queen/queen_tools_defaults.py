@@ -145,11 +145,150 @@ _TOOL_CATEGORIES: dict[str, list[str]] = {
     "context_awareness": [
         "get_current_time",
         "get_account_info",
+        # System memory — regex search across the queen's own message history
+        # (across sessions). In-scope content: user text, assistant prose,
+        # and tool result bodies. Never includes tool names, tool inputs,
+        # reasoning, finish reasons, token counts, or timestamps.
+        "search_messages",
     ],
     # BI / financial chart + diagram rendering. Calling chart_render
     # both embeds the chart live in chat and produces a downloadable PNG.
     "charts": [
         "@server:chart-tools",
+    ],
+    # ----- OAuth-bound categories ------------------------------------
+    # These tools require an OAuth provider connection (Google, GitHub,
+    # HubSpot, Notion, Slack). They are listed in the Library catalog
+    # regardless of whether the provider is currently authorized — the
+    # UI shows a greyed-out checkbox + Connect button when not — and
+    # are filtered out of the worker prompt at spawn time if the
+    # provider has no live account. New OAuth tools added under each
+    # provider here will auto-light up once the user authorizes.
+    "email_oauth": [
+        "send_email",
+        "gmail_list_messages",
+        "gmail_get_message",
+        "gmail_create_draft",
+        "gmail_reply_email",
+        "gmail_modify_message",
+        "gmail_trash_message",
+        "gmail_create_label",
+        "gmail_list_labels",
+        "gmail_batch_get_messages",
+        "gmail_batch_modify_messages",
+    ],
+    "calendar_oauth": [
+        "calendar_list_calendars",
+        "calendar_get_calendar",
+        "calendar_list_events",
+        "calendar_get_event",
+        "calendar_create_event",
+        "calendar_update_event",
+        "calendar_delete_event",
+        "calendar_check_availability",
+    ],
+    "google_workspace": [
+        "google_docs_create_document",
+        "google_docs_get_document",
+        "google_docs_insert_text",
+        "google_docs_format_text",
+        "google_docs_replace_all_text",
+        "google_docs_batch_update",
+        "google_docs_insert_image",
+        "google_docs_create_list",
+        "google_docs_add_comment",
+        "google_docs_list_comments",
+        "google_docs_export_content",
+        "google_sheets_create_spreadsheet",
+        "google_sheets_get_spreadsheet",
+        "google_sheets_get_values",
+        "google_sheets_update_values",
+        "google_sheets_append_values",
+        "google_sheets_clear_values",
+        "google_sheets_batch_update_values",
+        "google_sheets_batch_clear_values",
+        "google_sheets_add_sheet",
+        "google_sheets_delete_sheet",
+    ],
+    "github_oauth": [
+        "github_list_repos",
+        "github_get_repo",
+        "github_search_repos",
+        "github_list_issues",
+        "github_get_issue",
+        "github_create_issue",
+        "github_update_issue",
+        "github_list_pull_requests",
+        "github_get_pull_request",
+        "github_create_pull_request",
+        "github_search_code",
+        "github_list_branches",
+        "github_get_branch",
+        "github_list_stargazers",
+        "github_get_user_profile",
+        "github_get_user_emails",
+        "github_list_commits",
+        "github_create_release",
+        "github_list_workflow_runs",
+    ],
+    "hubspot_oauth": [
+        "hubspot_search_contacts",
+        "hubspot_get_contact",
+        "hubspot_create_contact",
+        "hubspot_update_contact",
+        "hubspot_search_companies",
+        "hubspot_get_company",
+        "hubspot_create_company",
+        "hubspot_update_company",
+        "hubspot_search_deals",
+        "hubspot_get_deal",
+        "hubspot_create_deal",
+        "hubspot_update_deal",
+        "hubspot_delete_object",
+        "hubspot_list_associations",
+        "hubspot_create_association",
+    ],
+    "notion_oauth": [
+        "notion_search",
+        "notion_get_page",
+        "notion_create_page",
+        "notion_update_page",
+        "notion_query_database",
+        "notion_get_database",
+        "notion_create_database",
+        "notion_update_database",
+        "notion_get_block_children",
+        "notion_get_block",
+        "notion_update_block",
+        "notion_delete_block",
+        "notion_append_blocks",
+    ],
+    # Slack is currently "Coming soon" in the desktop integrations UI,
+    # but queens still get the category — the per-spawn credential
+    # filter drops the tools until the provider is connected, so when
+    # Slack ships the queens auto-light up without any sidecar churn.
+    "slack_oauth": [
+        "slack_send_message",
+        "slack_list_channels",
+        "slack_get_channel_history",
+        "slack_get_channel_info",
+        "slack_list_users",
+        "slack_get_user_info",
+        "slack_find_user_by_email",
+        "slack_send_dm",
+        "slack_search_messages",
+        "slack_get_thread_replies",
+        "slack_get_messages_for_analysis",
+        "slack_get_conversation_context",
+        "slack_update_message",
+        "slack_delete_message",
+        "slack_schedule_message",
+        "slack_add_reaction",
+        "slack_remove_reaction",
+        "slack_pin_message",
+        "slack_unpin_message",
+        "slack_upload_file",
+        "slack_get_permalink",
     ],
 }
 
@@ -180,6 +319,9 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "research",
         "context_awareness",
         "charts",
+        "email_oauth",
+        "github_oauth",
+        "slack_oauth",
     ],
     # Head of Growth — data, experiments, competitor research; no security.
     "queen_growth": [
@@ -190,6 +332,9 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "research",
         "context_awareness",
         "charts",
+        "email_oauth",
+        "slack_oauth",
+        "hubspot_oauth",
     ],
     # Head of Product Strategy — user research + roadmaps; no security.
     "queen_product_strategy": [
@@ -200,6 +345,9 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "research",
         "context_awareness",
         "charts",
+        "email_oauth",
+        "notion_oauth",
+        "slack_oauth",
     ],
     # Head of Finance — financial models (CSV/Excel heavy), market research.
     "queen_finance_fundraising": [
@@ -211,6 +359,9 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "research",
         "context_awareness",
         "charts",
+        "email_oauth",
+        "google_workspace",
+        "hubspot_oauth",
     ],
     # Head of Legal — reads contracts/PDFs, researches; no data/security.
     "queen_legal": [
@@ -220,6 +371,8 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "browser_interaction",
         "research",
         "context_awareness",
+        "email_oauth",
+        "google_workspace",
     ],
     # Head of Brand & Design — visual refs, style guides; no data/security.
     "queen_brand_design": [
@@ -229,6 +382,8 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "browser_interaction",
         "research",
         "context_awareness",
+        "email_oauth",
+        "notion_oauth",
     ],
     # Head of Marketing — positioning, content, competitor research, campaign
     # performance. Charts included for funnel/audience reporting; no security.
@@ -249,6 +404,9 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "browser_interaction",
         "research",
         "context_awareness",
+        "email_oauth",
+        "slack_oauth",
+        "notion_oauth",
     ],
     # Head of Operations — processes, automation, observability.
     "queen_operations": [
@@ -259,6 +417,11 @@ QUEEN_DEFAULT_CATEGORIES: dict[str, list[str]] = {
         "browser_interaction",
         "context_awareness",
         "charts",
+        "email_oauth",
+        "calendar_oauth",
+        "slack_oauth",
+        "notion_oauth",
+        "hubspot_oauth",
     ],
 }
 
