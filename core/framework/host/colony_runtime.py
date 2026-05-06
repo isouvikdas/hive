@@ -882,6 +882,30 @@ class ColonyRuntime:
         # unchanged.
         spawn_tools = self._apply_tool_allowlist(spawn_tools)
 
+        # Per-spawn MCP credential filter. The Tool Library always
+        # surfaces every credentialed MCP tool so users can pre-enable
+        # them, but a worker that can't actually call a tool because
+        # the provider has no live OAuth account shouldn't see it in
+        # the prompt at all. Drop those names here — the filter is
+        # spawn-time, so the moment the user authorises a provider
+        # the very next worker spawn picks up the new tools.
+        try:
+            from framework.credentials.validation import compute_unavailable_mcp_tools
+
+            candidate_names = {
+                getattr(t, "name", None) for t in spawn_tools if getattr(t, "name", None)
+            }
+            mcp_drop, mcp_messages = compute_unavailable_mcp_tools(candidate_names)
+            if mcp_drop:
+                spawn_tools = [t for t in spawn_tools if getattr(t, "name", None) not in mcp_drop]
+                logger.info(
+                    "Spawn-time MCP filter: dropped %d tool(s) without live credentials [%s]",
+                    len(mcp_drop),
+                    "; ".join(mcp_messages),
+                )
+        except Exception:
+            logger.debug("Spawn-time MCP credential filter failed", exc_info=True)
+
         # Colony progress tracker: when the caller supplied a db_path
         # in input_data, this worker is part of a SQLite task queue
         # and must see the hive.colony-progress-tracker skill body in

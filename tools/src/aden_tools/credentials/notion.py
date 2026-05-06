@@ -8,7 +8,10 @@ Requires NOTION_API_TOKEN.
 from .base import CredentialSpec
 
 NOTION_CREDENTIALS = {
-    "notion_token": CredentialSpec(
+    # Spec key drives the user-visible label in the credentials page;
+    # ``credential_id`` stays as ``notion_token`` so existing local
+    # encrypted store entries remain readable across the rename.
+    "notion": CredentialSpec(
         env_var="NOTION_API_TOKEN",
         tools=[
             "notion_search",
